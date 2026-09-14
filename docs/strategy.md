@@ -34,6 +34,9 @@ this credibly.
 > to anchor the UX comparison. Annotate: click depth to reach a position, time
 > to first paint, what the shock template editor looks like.
 
+For comparison, the working prototype is in
+[architecture.md](architecture.md) and `docs/images/`.
+
 ---
 
 ## 2. Competitive landscape
@@ -170,8 +173,11 @@ the summary, measured on a 4-core box with 15GB RAM:
 
 | Book size | Snapshot build | Drill into a node | Full re-pivot |
 |---|---|---|---|
-| 1M positions | 9.5 s | 31 ms | 27–238 ms |
-| 5M positions | 40 s | 155 ms | 120 ms – 1.6 s |
+| 1M positions | 7 s | 31 ms | 36–292 ms |
+| 5M positions | 42 s | 165 ms | 119 ms – 1.5 s |
+
+Repeat pivots are served from a per-batch aggregate cache: 73 ms cold, 0.5 ms
+warm, with re-sorting and paging under 1 ms.
 
 Interaction is comfortably interactive at every scale tested. The snapshot build
 is a batch step that runs once per snapshot, where tens of seconds is

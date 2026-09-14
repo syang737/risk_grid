@@ -16,17 +16,17 @@ Drilling from firm level into a single account is the same operation at a
 different grain.
 
 ```
-positions (N)                    scenarios (S = 50)
-     │                                  │
-     └──────────► reprice ◄─────────────┘
+positions (N)                    scenarios (S)
+     │                                 │
+     └──────────► reprice ◄────────────┘
                      │
-                (N × S) float32 P&L matrix        ← built once per snapshot
+                (N × S) float32 P&L matrix        ← built once per batch
                      │
               groupby-sum on any dimension        ← every user interaction
                      │
             expanded tree nodes only (~25 rows)
                      │
-                Arrow IPC over the wire
+                    JSON over the wire (~13 KB)
 ```
 
 Two consequences worth stating plainly:
@@ -37,7 +37,62 @@ Two consequences worth stating plainly:
 - **Cost scales with the data under the expanded node**, not with book size.
 
 Post-trade scope makes this work: the book is a snapshot, so the matrix is
-rebuilt on a schedule rather than maintained against a tick stream.
+rebuilt per batch rather than maintained against a tick stream.
+
+---
+
+## One pivot model
+
+The incumbent exposes four fixed groupings as toolbar tabs (Master Accts,
+Accounts, Instruments, Contracts). All four are the same operation with
+different dimension orders, so `PivotRequest` carries the order instead:
+
+```
+dimensions  ("sector", "underlying", "contract")   ordered row grouping
+path        (("sector", "Banking"),)               expanded ancestors, as filters
+filters     (Filter("worst", "lessThan", -1e6),)   user column filters
+measures    from the active column template
+detail_dimensions                                  rendered as value-or-count cells
+sort / offset / limit                              presentation only
+```
+
+Children of a node are `group_by(dimensions[len(path)])` filtered by `path +
+filters`. Any order works, including interleaving account and instrument
+dimensions, and the leaf level returns raw positions.
+
+### Distinct-value cells
+
+A dimension that is not the grouping key aggregates both `n_unique` and `first`.
+If the group holds exactly one value the cell shows it; otherwise the cell is
+null and carries a count, which the client renders as a clickable chip
+(`2,528 accounts`). Clicking it inserts that dimension at the row's depth and
+re-expands — which is how cross-dimension drill is invoked.
+
+This is the fix for the incumbent's `[21]` cells, and the two problems turn out
+to be one: the useless number was sitting exactly where the missing affordance
+belonged. The behaviour is visible in one screen — a sector row reads
+"25 desks", while each account row beneath it shows its actual desk name,
+because within one account there is only one.
+
+### Filters split by what they refer to
+
+Not every filter can run in the same place, and getting this wrong is silent:
+
+- A filter on a **dimension or raw attribute** (sector, `iv`, `dte`) selects
+  positions and runs **before** the groupby.
+- A filter on a **measure, a scenario, or Max Risk** refers to the aggregate the
+  user is looking at and runs **after**. Applying `delta > 1000` per position
+  would drop rows and change every remaining group's sum into something nobody
+  asked for.
+
+### Worst-of-sum, everywhere
+
+Max Risk at any level is the minimum across the *summed* scenario columns, never
+the sum of each child's own worst. Summing worsts assumes every position bottoms
+out in the same scenario simultaneously, which overstates risk badly. The
+totals row makes this visible: in a 200k-position book the portfolio's worst
+single scenario is meaningfully better than adding up each sector's worst,
+because sectors bottom out in different scenarios.
 
 ---
 
@@ -46,56 +101,91 @@ rebuilt on a schedule rather than maintained against a tick stream.
 50 scenarios (10 sigma-moves × 5 vol shifts), ~85% options, exact American
 repricing.
 
-| positions | snapshot build | pivot by desk | pivot by underlying | desk × account | expiry × strike | drill into node | Arrow IPC | matrix | peak RSS |
-|---|---|---|---|---|---|---|---|---|---|
-| 100,000 | 1.2 s | 6 ms | 19 ms | 75 ms | 54 ms | 8 ms | 2 ms | 0.02 GB | 0.5 GB |
-| 1,000,000 | 9.5 s | 27 ms | 144 ms | 207 ms | 238 ms | 31 ms | 2 ms | 0.19 GB | 1.6 GB |
-| 5,000,000 | 40.3 s | 120 ms | 1,610 ms | 1,601 ms | 1,643 ms | 155 ms | 2 ms | 0.93 GB | 5.4 GB |
+| positions | matrix build | pivot by desk | pivot by underlying | desk × account | expiry × strike | with detail cells | drill into node | wire | matrix | peak RSS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 100,000 | 1.1 s | 9 ms | 19 ms | 70 ms | 54 ms | 15 ms | 5 ms | 2 ms | 0.02 GB | 0.5 GB |
+| 1,000,000 | 7.0 s | 36 ms | 175 ms | 242 ms | 292 ms | 164 ms | 31 ms | 1 ms | 0.19 GB | 1.6 GB |
+| 5,000,000 | 41.7 s | 119 ms | 1,390 ms | 1,472 ms | 1,479 ms | 1,191 ms | 165 ms | 1 ms | 0.93 GB | 5.8 GB |
 
-A node page is ~13 KB on the wire regardless of book size.
+**Method, because it changes how to read the table.** Pivot figures are the best
+of three after a warm-up, which is the steady-state interaction cost. Matrix
+build is a single cold sample per scale, so it is the noisy column: the spike
+reported 14.3 s at 1M on a box that was also running the dev stack, while three
+consecutive runs on a quiet box gave 10.1 / 7.0 / 6.9 s. The 7.0 s above is the
+steady-state figure; treat the 5M number as similarly generous.
 
 ### Reading these honestly
 
 **The interactive claim holds.** Drilling into a node — by far the most common
-interaction — is 8–155 ms across the whole range. Full-book re-pivots are 27–238
-ms at 1M.
+interaction — is 5–165 ms across the whole range. Full-book re-pivots are
+36–292 ms at 1M.
 
-**At 5M, full-book re-pivots reach 1.6 s**, which is past the interactive
-threshold. Mitigation is straightforward and not yet built: the top few pivot
-levels do not change between snapshots, so they can be materialized once when the
-matrix is built. Only drill-downs need to be computed live, and those are already
-fast. This is worth doing before any customer has a 5M-row book, not after.
+**At 5M, full-book re-pivots reach 1.5 s**, past the interactive threshold. The
+aggregate cache below covers the repeat case, and `Batch.warm()` covers the
+first screen; what remains uncovered is the first time a user picks an unusual
+dimension order on a 5M book.
 
-**The snapshot build missed the bar I originally set** ("a few seconds"). That
-bar was wrong, not the result: the build is a batch step that runs once per
-snapshot, where 40 s is operationally irrelevant. The number that had to be
-interactive is the pivot, and it is.
+**The snapshot build is a batch step**, run once per batch, where tens of
+seconds is operationally irrelevant. An earlier plan set a "few seconds" bar for
+it; that bar was wrong, not the result.
 
-**Memory is a non-issue.** 5.4 GB peak for a 5M-position book on a 15 GB box.
+**Distinct-value cells cost about 15–20 ms per dimension per million rows** —
+164 ms at 1M for four of them, against 36 ms for the same pivot without. Cheap
+enough to ship, not cheap enough to compute for dimensions nobody is displaying,
+so only requested ones are aggregated.
+
+**Memory is a non-issue.** 5.8 GB peak for a 5M-position book on a 15 GB box.
 
 ### What made it fast
 
-Two changes, both worth more than any language choice:
-
 1. **Chunk size, for cache residency — 3–4x.** At 50 scenarios an 8,000-row
    chunk keeps float64 temporaries near 3 MB, which fits L3. Chunks of 250,000
-   measured 3–4x slower at identical thread counts. This dwarfed the gain from
-   threading.
-2. **Branch-free pricing.** Masking expired/zero-vol rows forces fancy-index
-   copies of every input; clipping and patching afterwards is faster at book
-   scale. Put prices come from put-call parity rather than two more normal CDF
-   evaluations.
+   measured 3–4x slower at identical thread counts. This dwarfed threading.
+2. **Branch-free pricing.** Masking expired rows forces fancy-index copies of
+   every input; clipping and patching afterwards is faster at book scale. Put
+   prices come from put-call parity rather than two more normal CDF calls.
+3. **Threading** adds roughly 2x on 4 cores. The work is embarrassingly parallel
+   and numpy/scipy release the GIL, so threads suffice — no pickling.
 
-Threading adds ~2x on 4 cores on top of that. The work is embarrassingly parallel
-and numpy/scipy release the GIL, so threads suffice — no pickling, no processes.
+---
+
+## Batches and the aggregate cache
+
+A batch is a named, timestamped snapshot (`US WBL IntraDay 2026-08-13 14:16:42`),
+modelled explicitly because post-trade stress is snapshot-shaped and because
+retrofitting batch-vs-batch comparison later would be painful.
+
+Two caches, for different reasons:
+
+- **`BatchStore`** holds loaded batches across requests, LRU by count. A grid
+  session fires dozens of pivots at one batch and a 5M-row batch is several GB.
+- **`Batch._aggregates`** holds computed aggregates keyed on request identity,
+  **excluding sort and paging** — those are applied to the cached frame. Capped
+  by estimated bytes rather than entry count, because a contract-level aggregate
+  is a million rows while a desk-level one is 25.
+
+Measured at 500k positions: a root pivot costs 73 ms cold, **0.5 ms warm**;
+re-sorting it 0.9 ms; paging it 0.4 ms.
+
+### The cache key is also correctness
+
+Cache keys include only dimensions up to the current depth, since deeper ones
+cannot affect this level's rows. That makes the totals request — which truncates
+to the root dimension — hash identical to the root display request, so both read
+one aggregate.
+
+That sharing is not merely an optimisation. Float summation is not associative,
+so recomputing the same aggregate by a different route can land a group on the
+other side of a post-aggregation filter. Before this, an entire sector (736
+positions) appeared in the totals and not in the rows above them.
 
 ---
 
 ## A rejected shortcut, and why it matters
 
-The obvious optimization is to reprice European in each scenario and carry the
-**early exercise premium** through unchanged from the base snapshot. It is ~2.7x
-faster (3.5 s vs 9.5 s at 1M).
+The obvious optimisation is to reprice European in each scenario and carry the
+**early exercise premium** through unchanged from the base snapshot. It is
+roughly 2.7x faster.
 
 It is also not accurate enough to ship, and the way it fails is instructive.
 Measured on a 200k book with `spikes/eep_error.py`:
@@ -111,36 +201,13 @@ The headline number is reassuring and misleading. Aggregate worst-case lands
 almost exactly right because errors cancel; per scenario there is a systematic
 ~$3MM bias in the near-the-money rows. The cause is mechanical: as the underlying
 falls, puts go deep in the money and their early exercise premium grows — which
-is exactly the quantity this model holds fixed. `test_american_put_premium_grows_with_moneyness`
-in `tests/test_pricing.py` pins that behaviour.
+is exactly the quantity this model holds fixed.
+`test_american_put_premium_grows_with_moneyness` pins that behaviour.
 
 Kept as `model="eep"` for previews, clearly marked. **Default is exact
-Bjerksund-Stensland.** The lesson generalizes: validate an approximation against
-the number the screen actually displays, not against a portfolio aggregate where
-errors cancel.
-
----
-
-## Layout
-
-```
-risk/
-  pricing.py     Vectorized Black-Scholes + greeks; Bjerksund-Stensland 1993
-                 for American. No per-position loops anywhere.
-  scenarios.py   Shock templates. Moves in flat pct or per-underlying sigma
-                 units ("historical stddev" templates).
-  engine.py      Base valuation and the (N x S) P&L matrix. Chunked + threaded.
-  aggregate.py   Server-side pivot; Arrow IPC serialization of node pages.
-  synthetic.py   Book generator shaped like a real BD book (skewed accounts,
-                 chains fanning across expiries/strikes) — pivot cost depends
-                 on cardinality and skew, not just row count.
-spikes/
-  perf_spike.py  The table above.
-  eep_error.py   The approximation error study above.
-tests/
-  test_pricing.py  Hull reference values, put-call parity, greeks vs finite
-                   difference, American >= European >= intrinsic.
-```
+Bjerksund-Stensland.** The lesson generalises: validate an approximation against
+the number the screen displays, not against a portfolio aggregate where errors
+cancel.
 
 ### Why Bjerksund-Stensland 1993 and not 2002
 
@@ -151,23 +218,74 @@ dividend-heavy enough to care.
 
 ---
 
+## API
+
+FastAPI, speaking AG Grid's server-side row model shape so the browser
+datasource needs no translation layer:
+
+| AG Grid field | Maps to |
+|---|---|
+| `rowGroupCols` / `dimensions` | `PivotRequest.dimensions` |
+| `groupKeys` | `path` (cast back to column dtype — strike is numeric) |
+| `filterModel` | `filters`, split pre/post as above |
+| `sortModel` | `sort` |
+| `startRow` / `endRow` | `offset` / `limit` |
+
+OR-combined filters are refused with a 400 rather than silently narrowing a risk
+view. Non-finite floats are nulled before serialization — an expired deep-OTM
+option can produce NaN, which is not valid JSON and would throw in the browser
+on an otherwise fine payload.
+
+**Wire format.** An earlier version of this document specified Arrow IPC. That
+was right for bulk payloads and wrong for the row model: blocks are ~100 rows,
+where JSON is a few tens of KB and needs no Arrow dependency or conversion step
+in the browser. `aggregate.to_arrow_ipc` remains for full-book export.
+
+---
+
+## Frontend
+
+React + TypeScript + Vite, AG Grid Enterprise on the server-side row model.
+
+The phase-1 plan argued for a custom grid on TanStack Virtual, on the grounds
+that the UX is the product thesis. Seeing the requirements — tree drill, column
+move/sort/filter, pinned totals, virtualization — changed that: it is precisely
+what AG Grid Enterprise's server-side row model does, at $999/developer
+perpetual. Building it is 2–3 months on the *generic* part of the UI. The
+differentiation is the shock template editor, sigma calibration, and not being
+Citrix, none of which is the grid widget.
+
+| File | What |
+|---|---|
+| `grid/RiskGrid.tsx` | Grid, tree drill, pinned totals, chip-drill re-expansion |
+| `grid/datasource.ts` | Row model datasource; stable row ids are the node's full route |
+| `grid/columns.ts` | Column defs from the resolved template; set filters for low-cardinality dimensions, text filters above that |
+| `grid/cells.tsx` | Chip renderer, signed-number colouring |
+| `panels/DimensionPicker.tsx` | Drill order and which dimensions show as chip columns |
+| `panels/ShockConfigPanel.tsx` | Live shock grid editor, applies by repricing the batch |
+
+Chip drill changes the dimension order, which reloads the grid — so the clicked
+row's route is saved and re-expanded once its level arrives, or the user loses
+their place on every drill.
+
+---
+
 ## Not yet built
 
-- **Frontend.** Recommendation stands: server-side pivot with TanStack Virtual
-  and custom cells, rather than an off-the-shelf grid. The UX is the entire
-  product thesis and should not be outsourced, and AG Grid's enterprise pivot
-  features carry licence costs a bootstrapped effort should avoid.
-  [FINOS Perspective](https://github.com/finos/perspective) (Apache 2.0,
-  C++/WASM streaming pivot engine) is the right benchmark and a viable fallback.
-- **API layer.** FastAPI returning Arrow IPC; `aggregate.to_arrow_ipc` is the
-  serialization boundary and is already in place.
-- **Materialized top-level pivots**, per the 5M note above.
-- **Data ingestion.** The actual hard problem. See strategy.md §3.
+- **Real data ingestion.** The actual hard problem: every clearing relationship
+  (Apex, Pershing, BAML, Wedbush, Broadridge BPS) is a bespoke file format. See
+  strategy.md §3.
+- **Batch comparison.** The batch object exists to make this possible; nothing
+  reads two at once yet.
+- **Saving column templates from the UI.** The API supports it; only shock
+  configs have an editor.
+- **By-strike vol shocks.** `scenarios.py` shifts the surface in parallel only.
+  A config requesting it is rejected rather than silently ignored.
 
 ### Margin engine, staged
 
 1. **Phase 1 (done).** BS greeks + user-defined shock templates with
-   per-underlying sigma calibration. Usable as a post-trade stress product.
+   per-underlying sigma calibration.
 2. **Phase 2.** TIMS / RBH replication for equity options. **Gated on** OCC
    margin parameter and theoretical price file access, which may depend on
    clearing-member status. Confirm before committing.
