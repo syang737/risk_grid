@@ -71,6 +71,9 @@ def base_valuation(positions: pl.DataFrame) -> pl.DataFrame:
     return positions.with_columns(
         pl.Series("mark", price),
         pl.Series("market_value", price * notional),
+        # Position size expressed in underlying units, which is how a risk
+        # screen shows size across options and equity in one column.
+        pl.Series("und_qty", notional),
         *[pl.Series(k, v * notional) for k, v in greeks.items()],
     )
 

@@ -44,6 +44,24 @@ class ScenarioGrid:
     def __len__(self) -> int:
         return len(self.underlying_shock)
 
+    def index_of(self, price: float, vol: float, tol: float = 1e-9) -> int:
+        """Locate a scenario by its (price, vol) coordinates.
+
+        Column templates select scenarios this way rather than by position, so
+        a template survives a change to the shock config -- swapping a 2-point
+        price axis for a 4-point one keeps "-2 sigma, flat vol" pointing at the
+        same thing instead of silently shifting to a different column.
+        """
+        hits = np.flatnonzero(
+            (np.abs(self.underlying_shock - price) <= tol) & (np.abs(self.vol_shock - vol) <= tol)
+        )
+        if not len(hits):
+            raise KeyError(f"no scenario at price={price}, vol={vol}")
+        return int(hits[0])
+
+    def coordinates(self) -> list[tuple[float, float]]:
+        return list(zip(self.underlying_shock.tolist(), self.vol_shock.tolist()))
+
     def move_pct(self, sigma_daily: np.ndarray | None, horizon_days: float = 1.0) -> np.ndarray:
         """Resolve underlying shocks to actual percentage moves.
 

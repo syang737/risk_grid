@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import polars as pl
 
-from risk.aggregate import attach_scenarios, children, pivot, to_arrow_ipc
+from risk.aggregate import (INSTRUMENT_DRILL, PivotRequest, aggregate,
+                            attach_scenarios, pivot, to_arrow_ipc)
 from risk.engine import base_valuation, scenario_pnl
 from risk.scenarios import sigma_grid
 from risk.synthetic import generate_book
@@ -93,7 +94,14 @@ def run_scale(n: int, n_scenarios_axis=(10, 5), repeats: int = 3) -> dict:
     bench("pivot_by_expiry_strike", lambda: pivot(df, ["expiry", "strike"]))
 
     top_desk = pivot(df, ["desk"]).sort("positions", descending=True)["desk"][0]
-    bench("drill_into_desk", lambda: children(df, {"desk": top_desk}, ("desk", "account")))
+    drill = PivotRequest(dimensions=("desk", "account"))
+    bench("drill_into_desk", lambda: aggregate(df, drill.child(top_desk)))
+
+    # The distinct-value cells behind the chip renderer: this is the cost of
+    # fixing the incumbent's useless [21] cell.
+    with_details = PivotRequest(dimensions=INSTRUMENT_DRILL,
+                                detail_dimensions=("account", "underlying", "expiry", "desk"))
+    bench("pivot_with_detail_cells", lambda: aggregate(df, with_details))
 
     node = pivot(df, ["desk"])
     with timer("arrow_ipc", t):
@@ -126,7 +134,8 @@ def main() -> None:
 
     print("\n\n## Results\n")
     cols = ["matrix_build", "pivot_by_desk", "pivot_by_underlying",
-            "pivot_desk_x_account", "pivot_by_expiry_strike", "drill_into_desk", "arrow_ipc"]
+            "pivot_desk_x_account", "pivot_by_expiry_strike",
+            "pivot_with_detail_cells", "drill_into_desk", "arrow_ipc"]
     header = "| positions | " + " | ".join(c.replace("_", " ") for c in cols) + " | matrix | peak RSS |"
     print(header)
     print("|" + "---|" * (len(cols) + 3))
