@@ -1,8 +1,13 @@
-"""FastAPI service behind the grid.
+"""The query service.
 
-One endpoint does the work: `POST /api/grid/rows` takes an AG Grid server-side
-row model request and returns one block of pivot rows. Everything else is
-metadata -- batches, dimensions, templates, configs.
+Serves pivots for persisted batches. It does not build them -- that is
+`python -m risk.build` -- so a rebuild never competes with the queries it is
+about to invalidate, and the two can be sized for the machines they suit.
+
+Isolation is two independent layers. The principal's firm is checked on every
+call, and the process refuses any firm other than `RISK_GRID_FIRM` when that is
+set. Deployed, each firm gets its own container, so position data never shares
+a process and a missing check is not by itself a leak.
 """
 
 from __future__ import annotations
@@ -11,43 +16,42 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from control.auth import AuthError, Forbidden, Principal, authenticate, bearer_token, resolve_firm, served_firm
+from control.db import get_database
+from control.service import list_batches as list_batch_records
 from risk.aggregate import DIMENSIONS, PivotRequest
-from risk.batch import Batch, BatchStore, build_batch
-from risk.synthetic import generate_book
+from risk.batch import Batch, BatchStore, load_batch
+from risk.build import open_store
 from risk.templates import ColumnTemplate, ShockConfig, TemplateStore
 
 from .models import GridRequest, GridResponse, build_path, jsonable, translate_filters
 
-DEFAULT_POSITIONS = int(os.environ.get("RISK_GRID_POSITIONS", 250_000))
+STORE_URI = os.environ.get("RISK_GRID_STORE", "./data")
 TEMPLATE_ROOT = Path(os.environ.get("RISK_GRID_TEMPLATES", Path.home() / ".risk_grid"))
+BATCH_CACHE_SIZE = int(os.environ.get("RISK_GRID_BATCH_CACHE", 3))
 
-batches = BatchStore()
-templates = TemplateStore(TEMPLATE_ROOT)
+store = open_store(STORE_URI)
 
-
-def _seed_batch(n: int = DEFAULT_POSITIONS, config_name: str = "Exposure") -> Batch:
-    """Build a synthetic batch so the app is usable with no data feed attached."""
-    config = templates.get_config(config_name)
-    positions, sigma = generate_book(n, seed=7)
-    batch = build_batch(
-        positions, sigma, grid=config.to_grid(),
-        label="US WBL IntraDay", shock_config=config.name,
-    )
-    batch.warm()
-    return batches.put(batch)
+# One loaded-batch cache per firm. Normally a container serves a single firm and
+# this holds one entry; the dict exists so local development can run without
+# spinning up a container per firm.
+_batches: dict[str, BatchStore] = {}
+# Templates and shock configs are user content, so they are namespaced by firm
+# for the same reason position data is.
+_templates: dict[str, TemplateStore] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _seed_batch()
+    get_database().create_all()
     yield
 
 
-app = FastAPI(title="risk_grid", lifespan=lifespan)
+app = FastAPI(title="risk_grid query service", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -56,16 +60,72 @@ app.add_middleware(
 )
 
 
-def _batch(batch_id: str | None) -> Batch:
+# --------------------------------------------------------------------------
+# Dependencies
+# --------------------------------------------------------------------------
+
+
+def get_session() -> Session:
+    session = get_database().session()
     try:
-        return batches.get(batch_id) if batch_id else batches.latest()
+        yield session
+        session.commit()
+    finally:
+        session.close()
+
+
+def principal(
+    authorization: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+) -> Principal:
+    try:
+        return authenticate(session, bearer_token(authorization))
+    except AuthError:
+        raise HTTPException(401, "invalid credentials")
+
+
+def _firm(requested: str | None, who: Principal) -> str:
+    try:
+        return resolve_firm(who, requested)
+    except Forbidden as exc:
+        raise HTTPException(403, str(exc))
+
+
+def templates_for(firm_id: str) -> TemplateStore:
+    if firm_id not in _templates:
+        _templates[firm_id] = TemplateStore(TEMPLATE_ROOT / firm_id)
+    return _templates[firm_id]
+
+
+def batch_for(firm_id: str, batch_id: str | None, session: Session) -> Batch:
+    """Load a batch, from the process cache or from storage.
+
+    `batch_id` of None means the firm's most recent ready batch, which is what
+    a grid opening cold wants.
+    """
+    cache = _batches.setdefault(firm_id, BatchStore(BATCH_CACHE_SIZE))
+
+    if batch_id is None:
+        records = list_batch_records(session, firm_id, limit=1)
+        if not records:
+            raise HTTPException(404, f"no batches available for firm {firm_id}")
+        batch_id = records[0].batch_id
+
+    try:
+        return cache.get(batch_id)
     except KeyError:
+        pass
+
+    try:
+        return cache.put(load_batch(store, firm_id, batch_id))
+    except (FileNotFoundError, KeyError, OSError):
         raise HTTPException(404, f"no such batch: {batch_id}")
 
 
-def _template(name: str | None) -> ColumnTemplate:
+def _template(firm_id: str, name: str | None) -> ColumnTemplate:
+    store_ = templates_for(firm_id)
     try:
-        return templates.get_template(name) if name else templates.list_templates()[0]
+        return store_.get_template(name) if name else store_.list_templates()[0]
     except (KeyError, IndexError):
         raise HTTPException(404, f"no such template: {name}")
 
@@ -76,9 +136,14 @@ def _template(name: str | None) -> ColumnTemplate:
 
 
 @app.post("/api/grid/rows", response_model=GridResponse)
-def grid_rows(request: GridRequest) -> GridResponse:
-    batch = _batch(request.batch_id)
-    template = _template(request.template)
+def grid_rows(
+    request: GridRequest,
+    who: Principal = Depends(principal),
+    session: Session = Depends(get_session),
+) -> GridResponse:
+    firm_id = _firm(request.firm_id, who)
+    batch = batch_for(firm_id, request.batch_id, session)
+    template = _template(firm_id, request.template)
 
     try:
         dimensions = request.dimension_names()
@@ -119,11 +184,21 @@ def grid_rows(request: GridRequest) -> GridResponse:
 
 
 @app.get("/api/grid/columns")
-def grid_columns(batch_id: str | None = None, template: str | None = None) -> dict:
-    """Resolve a column template against a batch's scenario grid."""
-    batch = _batch(batch_id)
-    tpl = _template(template)
-    config = templates.get_config(batch.shock_config)
+def grid_columns(
+    firm_id: str | None = None,
+    batch_id: str | None = None,
+    template: str | None = None,
+    who: Principal = Depends(principal),
+    session: Session = Depends(get_session),
+) -> dict:
+    firm = _firm(firm_id, who)
+    batch = batch_for(firm, batch_id, session)
+    tpl = _template(firm, template)
+    try:
+        config = templates_for(firm).get_config(batch.shock_config)
+    except KeyError:
+        raise HTTPException(404, f"no such shock config: {batch.shock_config}")
+
     resolved = tpl.resolve(config.to_grid())
     return {
         "template": tpl.name,
@@ -137,9 +212,16 @@ def grid_columns(batch_id: str | None = None, template: str | None = None) -> di
 
 
 @app.get("/api/grid/values/{column}")
-def grid_values(column: str, batch_id: str | None = None, limit: int = 1000) -> dict:
-    """Distinct values of a column, to populate a set filter."""
-    batch = _batch(batch_id)
+def grid_values(
+    column: str,
+    firm_id: str | None = None,
+    batch_id: str | None = None,
+    limit: int = 1000,
+    who: Principal = Depends(principal),
+    session: Session = Depends(get_session),
+) -> dict:
+    firm = _firm(firm_id, who)
+    batch = batch_for(firm, batch_id, session)
     try:
         return {"column": column, "values": batch.distinct(column, limit)}
     except KeyError:
@@ -152,64 +234,72 @@ def grid_values(column: str, batch_id: str | None = None, limit: int = 1000) -> 
 
 
 @app.get("/api/dimensions")
-def list_dimensions() -> list[dict]:
+def list_dimensions(who: Principal = Depends(principal)) -> list[dict]:
     return [{"name": d.name, "label": d.label, "axis": d.axis} for d in DIMENSIONS.values()]
 
 
 @app.get("/api/batches")
-def list_batches() -> list[dict]:
+def list_batches(
+    firm_id: str | None = None,
+    limit: int = 50,
+    who: Principal = Depends(principal),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    firm = _firm(firm_id, who)
     return [
-        {"id": b.id, "label": b.label, "displayName": b.display_name,
-         "timestamp": b.timestamp.isoformat(), "positions": b.positions,
-         "shockConfig": b.shock_config, "scenarios": list(b.scenario_labels),
-         "cache": b.cache_stats()}
-        for b in batches.list()
+        {
+            "id": r.batch_id,
+            "firmId": r.firm_id,
+            "label": r.label,
+            "displayName": f"{r.label} {r.timestamp:%Y-%m-%d %H:%M:%S}",
+            "timestamp": r.timestamp.isoformat(),
+            "positions": r.positions,
+            "shockConfig": r.shock_config,
+            "scenarios": r.manifest.get("scenario_labels", []),
+            "rollups": list(r.manifest.get("rollups", {})),
+        }
+        for r in list_batch_records(session, firm, limit=limit)
     ]
 
 
-class CreateBatch(BaseModel):
-    positions: int = DEFAULT_POSITIONS
-    config: str = "Exposure"
-
-
-@app.post("/api/batches")
-def create_batch(body: CreateBatch) -> dict:
-    """Rebuild a synthetic batch, e.g. after changing the shock config."""
-    try:
-        batch = _seed_batch(body.positions, body.config)
-    except KeyError:
-        raise HTTPException(404, f"no such config: {body.config}")
-    return {"id": batch.id, "displayName": batch.display_name, "positions": batch.positions}
-
-
 @app.get("/api/templates")
-def list_templates() -> list[dict]:
-    return [t.to_dict() for t in templates.list_templates()]
+def list_templates(
+    firm_id: str | None = None, who: Principal = Depends(principal)
+) -> list[dict]:
+    return [t.to_dict() for t in templates_for(_firm(firm_id, who)).list_templates()]
 
 
 @app.put("/api/templates")
-def save_template(body: dict) -> dict:
+def save_template(
+    body: dict, firm_id: str | None = None, who: Principal = Depends(principal)
+) -> dict:
+    firm = _firm(firm_id, who)
     try:
-        return templates.save_template(ColumnTemplate.from_dict(body)).to_dict()
+        return templates_for(firm).save_template(ColumnTemplate.from_dict(body)).to_dict()
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc))
 
 
 @app.delete("/api/templates/{name}")
-def delete_template(name: str) -> dict:
-    templates.delete_template(name)
+def delete_template(
+    name: str, firm_id: str | None = None, who: Principal = Depends(principal)
+) -> dict:
+    templates_for(_firm(firm_id, who)).delete_template(name)
     return {"deleted": name}
 
 
 @app.get("/api/configs")
-def list_configs() -> list[dict]:
-    return [c.to_dict() for c in templates.list_configs()]
+def list_configs(firm_id: str | None = None, who: Principal = Depends(principal)) -> list[dict]:
+    return [c.to_dict() for c in templates_for(_firm(firm_id, who)).list_configs()]
 
 
 @app.put("/api/configs")
-def save_config(body: dict) -> dict:
+def save_config(
+    body: dict, firm_id: str | None = None, who: Principal = Depends(principal)
+) -> dict:
+    firm = _firm(firm_id, who)
     try:
-        return templates.save_config(ShockConfig.from_dict(body)).to_dict()
+        return templates_for(firm).save_config(ShockConfig.from_dict(body)).to_dict()
     except NotImplementedError as exc:
         raise HTTPException(400, str(exc))
     except (KeyError, TypeError, ValueError) as exc:
@@ -217,11 +307,14 @@ def save_config(body: dict) -> dict:
 
 
 @app.delete("/api/configs/{name}")
-def delete_config(name: str) -> dict:
-    templates.delete_config(name)
+def delete_config(
+    name: str, firm_id: str | None = None, who: Principal = Depends(principal)
+) -> dict:
+    templates_for(_firm(firm_id, who)).delete_config(name)
     return {"deleted": name}
 
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "batches": len(batches)}
+    """Unauthenticated on purpose: load balancers do not carry credentials."""
+    return {"ok": True, "firm": served_firm(), "store": STORE_URI}

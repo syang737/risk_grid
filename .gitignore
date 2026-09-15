@@ -13,3 +13,6 @@ web/dist/
 web/node_modules/
 .risk_grid/
 web/*.tsbuildinfo
+*.db
+data/
+web/.env.local

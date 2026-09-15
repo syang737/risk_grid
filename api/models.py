@@ -44,6 +44,7 @@ class GridRequest(BaseModel):
     sortModel: list[SortItem] = Field(default_factory=list)
 
     # risk_grid additions
+    firm_id: str | None = None
     batch_id: str | None = None
     template: str | None = None
     dimensions: list[str] | None = None
@@ -125,7 +126,7 @@ def translate_filters(model: dict[str, Any]) -> tuple[Filter, ...]:
 
 
 def build_path(
-    dimensions: tuple[str, ...], group_keys: list[Any], frame: pl.DataFrame
+    dimensions: tuple[str, ...], group_keys: list[Any], source: pl.DataFrame | pl.LazyFrame
 ) -> tuple[tuple[str, Any], ...]:
     """AG Grid `groupKeys` -> a typed pivot path.
 
@@ -135,9 +136,10 @@ def build_path(
     if len(group_keys) > len(dimensions):
         raise ValueError("more group keys than dimensions")
 
+    schema = source.schema if isinstance(source, pl.DataFrame) else source.collect_schema()
     path = []
     for dim, raw in zip(dimensions, group_keys):
-        path.append((dim, _coerce(raw, frame.schema.get(dim))))
+        path.append((dim, _coerce(raw, schema.get(dim))))
     return tuple(path)
 
 

@@ -24,6 +24,10 @@ through a pivot API into a browser grid.
   scenarios by `(price, vol)` coordinate, so changing the config reports which
   columns it can no longer supply instead of silently repointing them.
 - **Pinned totals** that describe exactly the rows on screen, worst-of-sum.
+- **Multi-tenant**, with position data isolated per firm by both authorisation
+  and containment — a query process serves exactly one firm and refuses the rest.
+- **Batches are persisted**, so restarting costs 1.2s instead of repricing, and
+  the root level of every dimension answers from a rollup in under a millisecond.
 
 ![the grid](docs/images/grid.png)
 
@@ -31,17 +35,29 @@ through a pivot API into a browser grid.
 
 ```bash
 pip install -e ".[dev]"
-python -m uvicorn api.main:app --port 8000     # API + a synthetic batch
+
+# Control plane, a firm, and an API key (printed once).
+python -m control.bootstrap --firm acme --name "Acme Securities" \
+    --email ops@acme.test --role firm_admin
+
+# Build a batch. A separate process from the query service on purpose.
+python -m risk.build --firm acme --store ./data --synthetic 200000
+
+# Query service, pinned to one firm.
+RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000
+
+# Frontend. Put the token from bootstrap in web/.env.local as VITE_API_TOKEN.
 cd web && npm install && npm run dev           # http://localhost:5173
 ```
 
-`RISK_GRID_POSITIONS` sets the synthetic book size (default 250,000).
-AG Grid Enterprise runs unlicensed with a watermark; set
-`VITE_AG_GRID_LICENSE` to clear it.
+Settings and deployment topology are in [docs/hosting.md](docs/hosting.md).
+AG Grid Enterprise runs unlicensed with a watermark; set `VITE_AG_GRID_LICENSE`
+to clear it.
 
 ```bash
-pytest                          # 72 tests
+pytest                          # 100 tests
 python spikes/perf_spike.py     # the scaling table
+python spikes/storage_spike.py  # persistence, rollups, retention cost
 python spikes/eep_error.py      # pricing approximation study
 ```
 
@@ -60,10 +76,13 @@ node, about 13 KB. Full numbers in [docs/architecture.md](docs/architecture.md).
 | `risk/scenarios.py` | Shock grids: flat percent or per-underlying sigma units |
 | `risk/engine.py` | Base valuation and the position × scenario P&L matrix |
 | `risk/aggregate.py` | Composable pivots, distinct-value cells, totals |
-| `risk/batch.py` | Snapshot identity, batch store, aggregate cache |
+| `risk/batch.py` | Snapshot identity, batch store, rollups, aggregate cache |
+| `risk/storage.py` | Parquet artifacts, manifest, local and S3 backends |
+| `risk/build.py` | Build worker: reprice, write artifacts, index the batch |
+| `control/` | Firms, users, API keys, batch index, audit log |
 | `risk/templates.py` | Column templates and shock configs |
 | `risk/synthetic.py` | Realistically-shaped synthetic book generator |
 | `api/` | FastAPI, AG Grid server-side row model contract |
 | `web/` | React + AG Grid Enterprise frontend |
 | `spikes/` | Performance and accuracy studies |
-| `docs/` | [Strategy](docs/strategy.md) and [architecture](docs/architecture.md) |
+| `docs/` | [Strategy](docs/strategy.md), [architecture](docs/architecture.md), [hosting](docs/hosting.md) |

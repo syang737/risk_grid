@@ -204,8 +204,25 @@ def attach_scenarios(positions: pl.DataFrame, pnl, labels: tuple[str, ...]) -> p
     )
 
 
-def scenario_columns(df: pl.DataFrame) -> list[str]:
-    return [c for c in df.columns if c.startswith("s") and c[1:].isdigit()]
+# A pivot source is either a materialized frame or a lazy scan over Parquet.
+# Serving straight from Parquet measures within ~1.5x of RAM, and faster when
+# the column template needs few scenario columns, because projection pushdown
+# reads only those column chunks. See docs/hosting.md.
+Source = pl.DataFrame | pl.LazyFrame
+
+
+def as_lazy(source: Source) -> pl.LazyFrame:
+    return source.lazy() if isinstance(source, pl.DataFrame) else source
+
+
+def column_names(source: Source) -> list[str]:
+    if isinstance(source, pl.DataFrame):
+        return source.columns
+    return source.collect_schema().names()
+
+
+def scenario_columns(source: Source) -> list[str]:
+    return [c for c in column_names(source) if c.startswith("s") and c[1:].isdigit()]
 
 
 def detail_count_column(dim: str) -> str:
@@ -254,9 +271,9 @@ def _apply_sort(df: pl.DataFrame, sort: tuple[tuple[str, bool], ...], default: s
     return df
 
 
-def aggregate(df: pl.DataFrame, request: PivotRequest) -> PivotResult:
+def aggregate(source: Source, request: PivotRequest) -> PivotResult:
     """One level of the pivot tree, sorted and paged."""
-    return present(aggregate_frame(df, request), request)
+    return present(aggregate_frame(source, request), request)
 
 
 def present(result: PivotResult, request: PivotRequest) -> PivotResult:
@@ -270,16 +287,21 @@ def present(result: PivotResult, request: PivotRequest) -> PivotResult:
     return replace(result, rows=_slice(frame, request))
 
 
-def aggregate_frame(df: pl.DataFrame, request: PivotRequest) -> PivotResult:
+def aggregate_frame(source: Source, request: PivotRequest) -> PivotResult:
     """Produce one level of the pivot tree, unsorted and unpaged.
+
+    `source` may be a materialized frame or a lazy scan over Parquet; the plan
+    is identical either way, so a firm's batch can be served from disk without
+    holding it in RAM.
 
     At the leaf level (every dimension expanded) the raw positions under the
     path are returned instead of an aggregate.
     """
-    scen = scenario_columns(df)
+    available = column_names(source)
+    scen = [c for c in available if c.startswith("s") and c[1:].isdigit()]
     pre, post = _split_filters(request, scen)
 
-    lf = df.lazy()
+    lf = as_lazy(source)
     for e in _filter_exprs(request, pre):
         lf = lf.filter(e)
 
@@ -287,12 +309,12 @@ def aggregate_frame(df: pl.DataFrame, request: PivotRequest) -> PivotResult:
         return _leaf(lf, request, scen, post)
 
     group_col = request.group_column
-    measures = [m for m in request.measures if m in df.columns]
+    measures = [m for m in request.measures if m in available]
 
     # Dimensions already pinned by the path are constant within every group, so
     # computing distinct counts for them would be wasted work.
     pinned = {dim for dim, _ in request.path} | {group_col}
-    details = [d for d in request.detail_dimensions if d in df.columns and d not in pinned]
+    details = [d for d in request.detail_dimensions if d in available and d not in pinned]
 
     agg = (
         [pl.len().alias("positions")]
@@ -371,7 +393,7 @@ def totals_request(request: PivotRequest) -> PivotRequest:
                    sort=(), offset=0, limit=None)
 
 
-def totals(df: pl.DataFrame, request: PivotRequest) -> dict:
+def totals(source: Source, request: PivotRequest) -> dict:
     """Grand total row over the rows the grid is showing.
 
     Built from the root-level aggregate so that post-aggregation filters (Max
@@ -383,7 +405,9 @@ def totals(df: pl.DataFrame, request: PivotRequest) -> dict:
     scenario at once, which is both wrong and alarming.
     """
     return totals_from(
-        aggregate_frame(df, totals_request(request)).rows, request, scenario_columns(df)
+        aggregate_frame(source, totals_request(request)).rows,
+        request,
+        scenario_columns(source),
     )
 
 

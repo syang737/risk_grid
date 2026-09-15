@@ -9,11 +9,23 @@ import type {
 
 const BASE = "/api";
 
+// Every call is authenticated and resolves to exactly one firm server-side.
+// In dev the token comes from VITE_API_TOKEN (see `python -m control.bootstrap`);
+// a real deployment puts a session cookie or an SSO exchange here instead.
+const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
+  if (response.status === 401) {
+    throw new Error("Not authenticated - set VITE_API_TOKEN to a valid API key");
+  }
   if (!response.ok) {
     // The API puts the reason in `detail` -- surface it rather than a bare
     // status, since most failures here are a malformed pivot request that the
@@ -63,12 +75,6 @@ export const api = {
 
   dimensions: () => request<Dimension[]>("/dimensions"),
   batches: () => request<BatchInfo[]>("/batches"),
-  createBatch: (positions: number, config: string) =>
-    request<{ id: string; displayName: string; positions: number }>("/batches", {
-      method: "POST",
-      body: JSON.stringify({ positions, config }),
-    }),
-
   templates: () => request<ColumnTemplate[]>("/templates"),
   configs: () => request<ShockConfig[]>("/configs"),
   saveConfig: (config: ShockConfig) =>

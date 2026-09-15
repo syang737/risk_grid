@@ -162,8 +162,7 @@ export default function App() {
             {panel === "shocks" && (
               <ShockConfigPanel
                 config={activeConfig}
-                positions={batch?.positions ?? 250_000}
-                onRebuilt={() => void refreshMeta()}
+                onSaved={() => void refreshMeta()}
                 onError={setError}
               />
             )}

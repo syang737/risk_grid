@@ -4,8 +4,7 @@ import type { ShockAxis, ShockConfig } from "../api/types";
 
 interface Props {
   config: ShockConfig | null;
-  positions: number;
-  onRebuilt: (batchId: string) => void;
+  onSaved: () => void;
   onError: (message: string | null) => void;
 }
 
@@ -74,7 +73,7 @@ function AxisEditor({
   );
 }
 
-export function ShockConfigPanel({ config, positions, onRebuilt, onError }: Props) {
+export function ShockConfigPanel({ config, onSaved, onError }: Props) {
   const [draft, setDraft] = useState<ShockConfig | null>(config);
   const [busy, setBusy] = useState(false);
 
@@ -83,14 +82,13 @@ export function ShockConfigPanel({ config, positions, onRebuilt, onError }: Prop
 
   const scenarios = axisPoints(current.price).length * axisPoints(current.vol).length;
 
-  async function apply() {
+  async function save() {
     if (!current) return;
     setBusy(true);
     try {
       await api.saveConfig(current);
-      const batch = await api.createBatch(positions, current.name);
       onError(null);
-      onRebuilt(batch.id);
+      onSaved();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -146,13 +144,14 @@ export function ShockConfigPanel({ config, positions, onRebuilt, onError }: Prop
 
       <div className="panel-foot">
         <span>{scenarios} scenarios</span>
-        <button type="button" onClick={apply} disabled={busy}>
-          {busy ? "Repricing…" : "Apply & reprice"}
+        <button type="button" onClick={save} disabled={busy}>
+          {busy ? "Saving…" : "Save config"}
         </button>
       </div>
       <p className="hint">
-        Applying reprices the whole book against the new grid. By-strike vol shocks are not
-        implemented — the surface shifts in parallel only.
+        Saving affects the next batch built against this config — repricing is the build
+        worker's job, not the query service's, so it does not happen on this click. By-strike
+        vol shocks are not implemented; the surface shifts in parallel only.
       </p>
     </div>
   );
