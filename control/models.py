@@ -204,3 +204,193 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(120))
     target: Mapped[str] = mapped_column(String(200), default="")
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# --------------------------------------------------------------------------
+# Ingestion
+# --------------------------------------------------------------------------
+
+
+class IngestionProfile(Base):
+    """How one firm's file becomes a batch.
+
+    Versioned rather than edited in place: a firm changing their export must
+    produce a new version, because last quarter's batches were built under the
+    old mapping and have to stay reproducible.
+    """
+
+    __tablename__ = "ingestion_profiles"
+    __table_args__ = (
+        UniqueConstraint("firm_id", "name", "version", name="uq_profile_firm_name_version"),
+        Index("ix_profiles_firm", "firm_id", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    name: Mapped[str] = mapped_column(String(120), default="default")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    connector_kind: Mapped[str] = mapped_column(String(32), default="local")
+    connector_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    file_format: Mapped[str] = mapped_column(String(16), default="csv")
+    read_options: Mapped[dict] = mapped_column(JSON, default=dict)
+    mappings: Mapped[list] = mapped_column(JSON, default=list)
+
+    # When a drop is expected, as a cron expression. Silence is the failure mode
+    # that actually hurts, so a missed window is itself alertable.
+    schedule: Mapped[str] = mapped_column(String(120), default="")
+    grace_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    shock_config: Mapped[str] = mapped_column(String(120), default="Exposure")
+    label: Mapped[str] = mapped_column(String(120), default="IntraDay")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    def to_profile(self):
+        """Build the runtime mapping profile this row describes."""
+        from ingest.mapping import IngestionProfile as RuntimeProfile
+
+        return RuntimeProfile.from_dict({
+            "firm_id": self.firm_id,
+            "name": self.name,
+            "version": self.version,
+            "file_format": self.file_format,
+            "read_options": self.read_options or {},
+            "mappings": self.mappings or [],
+        })
+
+
+class RunStatus(str, enum.Enum):
+    running = "running"
+    succeeded = "succeeded"
+    quarantined = "quarantined"
+    failed = "failed"
+
+
+class IngestionRun(Base):
+    """One attempt at one file. Kept whether or not it worked."""
+
+    __tablename__ = "ingestion_runs"
+    __table_args__ = (Index("ix_runs_firm_time", "firm_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ingestion_profiles.id"), nullable=True
+    )
+    file_name: Mapped[str] = mapped_column(String(400), default="")
+    status: Mapped[RunStatus] = mapped_column(Enum(RunStatus), default=RunStatus.running)
+    rows: Mapped[int] = mapped_column(Integer, default=0)
+    batch_id: Mapped[str] = mapped_column(String(128), default="")
+    findings: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(String(2000), default="")
+    quarantine_key: Mapped[str] = mapped_column(String(500), default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# --------------------------------------------------------------------------
+# Saved views, reports, alerts
+# --------------------------------------------------------------------------
+
+
+class SavedView(Base):
+    """A pivot worth returning to. Reports and alerts are both built on these."""
+
+    __tablename__ = "saved_views"
+    __table_args__ = (UniqueConstraint("firm_id", "name", name="uq_view_firm_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    # dimensions, detail_dimensions, filters, sort, template, expansion
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(320), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Report(Base):
+    """A saved view, on a schedule, to a list of people."""
+
+    __tablename__ = "reports"
+    __table_args__ = (UniqueConstraint("firm_id", "name", name="uq_report_firm_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    view_id: Mapped[int] = mapped_column(ForeignKey("saved_views.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    schedule: Mapped[str] = mapped_column(String(120), default="")
+    recipients: Mapped[list] = mapped_column(JSON, default=list)
+    formats: Mapped[list] = mapped_column(JSON, default=lambda: ["image", "csv"])
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(String(2000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    view: Mapped[SavedView] = relationship()
+
+
+class AlertMode(str, enum.Enum):
+    """Alerting every batch for a standing breach trains people to ignore it."""
+
+    transition = "transition"
+    every_batch = "every_batch"
+
+
+class AlertRule(Base):
+    """A pivot plus a threshold.
+
+    `spec` holds the same shape a grid request does -- dimensions, scope filters
+    and condition filters -- so evaluation is the pivot engine with a
+    post-aggregation filter, not a second query language.
+    """
+
+    __tablename__ = "alert_rules"
+    __table_args__ = (UniqueConstraint("firm_id", "name", name="uq_alert_firm_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+    mode: Mapped[AlertMode] = mapped_column(Enum(AlertMode), default=AlertMode.transition)
+    recipients: Mapped[list] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AlertState(Base):
+    """Whether one group of one rule is currently in breach.
+
+    This is what makes transition mode possible: without per-group state there
+    is no way to tell a new breach from a continuing one.
+    """
+
+    __tablename__ = "alert_state"
+    __table_args__ = (
+        UniqueConstraint("rule_id", "group_key", name="uq_alert_state_rule_group"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey("alert_rules.id"))
+    group_key: Mapped[str] = mapped_column(String(400))
+    breaching: Mapped[bool] = mapped_column(Boolean, default=False)
+    since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AlertEvent(Base):
+    """A firing. What breached, by how much, and whether anyone was told."""
+
+    __tablename__ = "alert_events"
+    __table_args__ = (Index("ix_alert_events_firm_time", "firm_id", "fired_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"))
+    rule_id: Mapped[int] = mapped_column(ForeignKey("alert_rules.id"))
+    batch_id: Mapped[str] = mapped_column(String(128), default="")
+    fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    rows: Mapped[list] = mapped_column(JSON, default=list)
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    notify_error: Mapped[str] = mapped_column(String(1000), default="")

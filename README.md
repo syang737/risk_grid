@@ -24,6 +24,16 @@ through a pivot API into a browser grid.
   scenarios by `(price, vol)` coordinate, so changing the config reports which
   columns it can no longer supply instead of silently repointing them.
 - **Pinned totals** that describe exactly the rows on screen, worst-of-sum.
+- **Onboarding as configuration.** Upload a firm's export, confirm the guessed
+  column mapping, see what comes out, save. Named transforms handle the awkward
+  things real exports do — unsigned quantities with a side column, accounting
+  negatives, strikes in thousandths, vol as a percent.
+- **Validation that quarantines** rather than half-loading. A truncated file
+  that loads is worse than one that errors.
+- **Alerts that are saved pivots.** "Any sector whose Max Risk is below -10MM"
+  is a group-by plus a post-aggregation filter, so the alert engine is the pivot
+  engine. Alerts on transition by default, not every batch.
+- **Scheduled reports** as a picture of the view plus the same rows as CSV.
 - **Multi-tenant**, with position data isolated per firm by both authorisation
   and containment — a query process serves exactly one firm and refuses the rest.
 - **Batches are persisted**, so restarting costs 1.2s instead of repricing, and
@@ -43,6 +53,9 @@ python -m control.bootstrap --firm acme --name "Acme Securities" \
 # Build a batch. A separate process from the query service on purpose.
 python -m risk.build --firm acme --store ./data --synthetic 200000
 
+# Or ingest a real file through a saved mapping profile.
+python -m ingest.worker --firm acme --store ./data --once
+
 # Query service, pinned to one firm.
 RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000
 
@@ -55,7 +68,7 @@ AG Grid Enterprise runs unlicensed with a watermark; set `VITE_AG_GRID_LICENSE`
 to clear it.
 
 ```bash
-pytest                          # 100 tests
+pytest                          # 181 tests
 python spikes/perf_spike.py     # the scaling table
 python spikes/storage_spike.py  # persistence, rollups, retention cost
 python spikes/eep_error.py      # pricing approximation study
@@ -79,10 +92,13 @@ node, about 13 KB. Full numbers in [docs/architecture.md](docs/architecture.md).
 | `risk/batch.py` | Snapshot identity, batch store, rollups, aggregate cache |
 | `risk/storage.py` | Parquet artifacts, manifest, local and S3 backends |
 | `risk/build.py` | Build worker: reprice, write artifacts, index the batch |
-| `control/` | Firms, users, API keys, batch index, audit log |
+| `control/` | Firms, users, API keys, batch index, audit log, views, reports, alerts |
+| `ingest/` | Canonical schema, field mapping, validation, connectors, the pipeline |
+| `alerting.py` | Alert rules, evaluated with the pivot engine |
+| `notify/` | Report rendering, screenshots, email delivery |
 | `risk/templates.py` | Column templates and shock configs |
 | `risk/synthetic.py` | Realistically-shaped synthetic book generator |
 | `api/` | FastAPI, AG Grid server-side row model contract |
 | `web/` | React + AG Grid Enterprise frontend |
 | `spikes/` | Performance and accuracy studies |
-| `docs/` | [Strategy](docs/strategy.md), [architecture](docs/architecture.md), [hosting](docs/hosting.md) |
+| `docs/` | [Strategy](docs/strategy.md), [architecture](docs/architecture.md), [hosting](docs/hosting.md), [operations](docs/operations.md) |

@@ -63,10 +63,13 @@ def env():
             )
             batches[firm] = manifest["batch_id"]
 
+        # Reset cached handles: these modules read configuration lazily, but a
+        # previous suite will have populated the caches from its own directories.
         import importlib
 
-        from api import main
+        from api import deps, main
 
+        deps.reset_state()
         importlib.reload(main)
         with TestClient(main.app) as client:
             yield client, tokens, batches

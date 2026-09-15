@@ -1,8 +1,9 @@
 """The query service.
 
 Serves pivots for persisted batches. It does not build them -- that is
-`python -m risk.build` -- so a rebuild never competes with the queries it is
-about to invalidate, and the two can be sized for the machines they suit.
+`python -m risk.build` or `python -m ingest.worker` -- so a rebuild never
+competes with the queries it is about to invalidate, and the two can be sized
+for the machines they suit.
 
 Isolation is two independent layers. The principal's firm is checked on every
 call, and the process refuses any firm other than `RISK_GRID_FIRM` when that is
@@ -12,37 +13,28 @@ a process and a missing check is not by itself a leak.
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from control.auth import AuthError, Forbidden, Principal, authenticate, bearer_token, resolve_firm, served_firm
+from control.auth import Principal, served_firm
 from control.db import get_database
 from control.service import list_batches as list_batch_records
 from risk.aggregate import DIMENSIONS, PivotRequest
-from risk.batch import Batch, BatchStore, load_batch
-from risk.build import open_store
-from risk.templates import ColumnTemplate, ShockConfig, TemplateStore
+from risk.templates import ColumnTemplate, ShockConfig
 
+from .admin import router as admin_router
+from .deps import (
+    batch_for,
+    get_session,
+    principal,
+    resolve,
+    store_uri,
+    templates_for,
+)
 from .models import GridRequest, GridResponse, build_path, jsonable, translate_filters
-
-STORE_URI = os.environ.get("RISK_GRID_STORE", "./data")
-TEMPLATE_ROOT = Path(os.environ.get("RISK_GRID_TEMPLATES", Path.home() / ".risk_grid"))
-BATCH_CACHE_SIZE = int(os.environ.get("RISK_GRID_BATCH_CACHE", 3))
-
-store = open_store(STORE_URI)
-
-# One loaded-batch cache per firm. Normally a container serves a single firm and
-# this holds one entry; the dict exists so local development can run without
-# spinning up a container per firm.
-_batches: dict[str, BatchStore] = {}
-# Templates and shock configs are user content, so they are namespaced by firm
-# for the same reason position data is.
-_templates: dict[str, TemplateStore] = {}
 
 
 @asynccontextmanager
@@ -58,68 +50,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# --------------------------------------------------------------------------
-# Dependencies
-# --------------------------------------------------------------------------
-
-
-def get_session() -> Session:
-    session = get_database().session()
-    try:
-        yield session
-        session.commit()
-    finally:
-        session.close()
-
-
-def principal(
-    authorization: str | None = Header(default=None),
-    session: Session = Depends(get_session),
-) -> Principal:
-    try:
-        return authenticate(session, bearer_token(authorization))
-    except AuthError:
-        raise HTTPException(401, "invalid credentials")
+app.include_router(admin_router)
 
 
 def _firm(requested: str | None, who: Principal) -> str:
-    try:
-        return resolve_firm(who, requested)
-    except Forbidden as exc:
-        raise HTTPException(403, str(exc))
-
-
-def templates_for(firm_id: str) -> TemplateStore:
-    if firm_id not in _templates:
-        _templates[firm_id] = TemplateStore(TEMPLATE_ROOT / firm_id)
-    return _templates[firm_id]
-
-
-def batch_for(firm_id: str, batch_id: str | None, session: Session) -> Batch:
-    """Load a batch, from the process cache or from storage.
-
-    `batch_id` of None means the firm's most recent ready batch, which is what
-    a grid opening cold wants.
-    """
-    cache = _batches.setdefault(firm_id, BatchStore(BATCH_CACHE_SIZE))
-
-    if batch_id is None:
-        records = list_batch_records(session, firm_id, limit=1)
-        if not records:
-            raise HTTPException(404, f"no batches available for firm {firm_id}")
-        batch_id = records[0].batch_id
-
-    try:
-        return cache.get(batch_id)
-    except KeyError:
-        pass
-
-    try:
-        return cache.put(load_batch(store, firm_id, batch_id))
-    except (FileNotFoundError, KeyError, OSError):
-        raise HTTPException(404, f"no such batch: {batch_id}")
+    return resolve(requested, who)
 
 
 def _template(firm_id: str, name: str | None) -> ColumnTemplate:
@@ -317,4 +252,4 @@ def delete_config(
 @app.get("/api/health")
 def health() -> dict:
     """Unauthenticated on purpose: load balancers do not carry credentials."""
-    return {"ok": True, "firm": served_firm(), "store": STORE_URI}
+    return {"ok": True, "firm": served_firm(), "store": store_uri()}

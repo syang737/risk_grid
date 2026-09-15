@@ -4,6 +4,9 @@ import type { BatchInfo, ColumnTemplate, Dimension, GridColumn, ShockConfig } fr
 import { RiskGrid } from "./grid/RiskGrid";
 import { DimensionPicker } from "./panels/DimensionPicker";
 import { ShockConfigPanel } from "./panels/ShockConfigPanel";
+import { AlertsScreen } from "./admin/AlertsScreen";
+import { MappingScreen } from "./admin/MappingScreen";
+import { RunsScreen } from "./admin/RunsScreen";
 
 // Account is deliberately left out of the drill order so it shows as a count
 // chip on every instrument row -- clicking one is the cross-dimension drill.
@@ -11,6 +14,14 @@ const DEFAULT_DIMENSIONS = ["sector", "underlying", "contract"];
 const DEFAULT_DETAIL = ["account", "desk"];
 
 type Panel = "dimensions" | "shocks" | null;
+type Screen = "grid" | "mapping" | "runs" | "alerts";
+
+const SCREENS: { id: Screen; label: string }[] = [
+  { id: "grid", label: "Grid" },
+  { id: "mapping", label: "Data feeds" },
+  { id: "runs", label: "Runs & reports" },
+  { id: "alerts", label: "Alerts" },
+];
 
 export default function App() {
   const [dimensions, setDimensions] = useState<Dimension[]>([]);
@@ -23,6 +34,7 @@ export default function App() {
   const [template, setTemplate] = useState<string>("Exposure");
   const [measures, setMeasures] = useState<GridColumn[]>([]);
   const [panel, setPanel] = useState<Panel>("dimensions");
+  const [screen, setScreen] = useState<Screen>("grid");
   const [error, setError] = useState<string | null>(null);
 
   const refreshMeta = useCallback(async () => {
@@ -93,25 +105,42 @@ export default function App() {
 
         <span className="spacer" />
 
-        {batch && (
+        <nav className="screens">
+          {SCREENS.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={screen === s.id ? "tab active" : "tab"}
+              onClick={() => setScreen(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </nav>
+
+        {screen === "grid" && batch && (
           <span className="stat">
             {batch.positions.toLocaleString()} positions · {batch.scenarios.length} scenarios
           </span>
         )}
-        <button
-          type="button"
-          className={panel === "dimensions" ? "tab active" : "tab"}
-          onClick={() => setPanel(panel === "dimensions" ? null : "dimensions")}
-        >
-          Drill order
-        </button>
-        <button
-          type="button"
-          className={panel === "shocks" ? "tab active" : "tab"}
-          onClick={() => setPanel(panel === "shocks" ? null : "shocks")}
-        >
-          Shocks
-        </button>
+        {screen === "grid" && (
+          <>
+            <button
+              type="button"
+              className={panel === "dimensions" ? "tab active" : "tab"}
+              onClick={() => setPanel(panel === "dimensions" ? null : "dimensions")}
+            >
+              Drill order
+            </button>
+            <button
+              type="button"
+              className={panel === "shocks" ? "tab active" : "tab"}
+              onClick={() => setPanel(panel === "shocks" ? null : "shocks")}
+            >
+              Shocks
+            </button>
+          </>
+        )}
       </header>
 
       {error && (
@@ -132,7 +161,10 @@ export default function App() {
 
       <div className="body">
         <main>
-          {dimensions.length > 0 && measures.length > 0 && batch ? (
+          {screen === "mapping" && <MappingScreen onError={setError} />}
+          {screen === "runs" && <RunsScreen onError={setError} />}
+          {screen === "alerts" && <AlertsScreen onError={setError} />}
+          {screen === "grid" && (dimensions.length > 0 && measures.length > 0 && batch ? (
             <RiskGrid
               dimensions={dimensions}
               activeDimensions={activeDimensions}
@@ -145,10 +177,10 @@ export default function App() {
             />
           ) : (
             <div className="panel-empty">Loading batch…</div>
-          )}
+          ))}
         </main>
 
-        {panel && (
+        {screen === "grid" && panel && (
           <aside>
             {panel === "dimensions" && (
               <DimensionPicker
