@@ -20,6 +20,8 @@ from pathlib import Path
 
 import polars as pl
 
+from config import load_env
+
 from .batch import build_batch, write_batch
 from .storage import LocalStore, ObjectStore, S3Store
 from .synthetic import generate_book
@@ -89,6 +91,7 @@ def build(
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env()
     parser = argparse.ArgumentParser(description="Build a risk_grid batch")
     parser.add_argument("--firm", required=True)
     parser.add_argument("--store", default="./data", help="directory or s3://bucket/prefix")

@@ -149,16 +149,18 @@ Roughly 1% of revenue against the $1.5–4M ARR `docs/strategy.md` targets.
 
 ## Running it
 
+Settings come from a `.env` file (copy `.env.example`) or from the environment,
+which takes precedence — so a container's orchestrator stays in charge and a
+file baked into an image cannot override it.
+
 ```bash
-# Control plane, a firm, and an API key (printed once).
-python -m control.bootstrap --firm acme --name "Acme Securities" \
-    --email ops@acme.test --role firm_admin
+cp .env.example .env
 
-# Build a batch. Separate process from the query service on purpose.
-python -m risk.build --firm acme --store ./data --synthetic 200000
+python -m control.bootstrap --firm acme --name "Acme Securities" --email ops@acme.test
+python -m risk.build --firm acme --synthetic 200000
+python -m uvicorn api.main:app --port 8000
 
-# Query service. RISK_GRID_FIRM pins it to one firm.
-RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000
+python -m control.keys issue --email ops@acme.test   # replace a lost token
 ```
 
 | Variable | Meaning |
@@ -168,6 +170,8 @@ RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000
 | `RISK_GRID_DATABASE_URL` | SQLAlchemy URL; SQLite locally, Postgres deployed |
 | `RISK_GRID_TEMPLATES` | Root for per-firm column templates and shock configs |
 | `RISK_GRID_BATCH_CACHE` | Loaded batches held per firm (default 3) |
+| `RISK_GRID_SMTP_*` | Email delivery; unset means reports print to the console |
+| `RISK_GRID_NO_DOTENV` | Skip `.env` entirely. Set by the test suite |
 
 ---
 

@@ -75,6 +75,36 @@ def create_user(
     return user
 
 
+def get_user_by_email(session: Session, email: str) -> User:
+    user = session.scalars(select(User).where(User.email == email)).one_or_none()
+    if user is None:
+        raise KeyError(email)
+    return user
+
+
+def find_key_by_prefix(session: Session, prefix: str) -> ApiKey:
+    """Locate a key by the public half of its token.
+
+    The prefix is deliberately the only handle a human ever has: it identifies
+    a key without being any part of the secret.
+    """
+    key = session.scalars(select(ApiKey).where(ApiKey.prefix == prefix)).one_or_none()
+    if key is None:
+        raise KeyError(prefix)
+    return key
+
+
+def list_keys(
+    session: Session, firm_id: str | None = None, email: str | None = None
+) -> list[ApiKey]:
+    query = select(ApiKey).join(User, ApiKey.user_id == User.id)
+    if firm_id:
+        query = query.where(User.firm_id == firm_id)
+    if email:
+        query = query.where(User.email == email)
+    return list(session.scalars(query.order_by(desc(ApiKey.created_at))))
+
+
 def issue_key(
     session: Session, user: User, label: str = "", *, actor: str = "system"
 ) -> tuple[ApiKey, str]:

@@ -43,32 +43,80 @@ through a pivot API into a browser grid.
 
 ## Running it
 
+Works the same on macOS, Linux and Windows — configuration lives in a file, so
+no command below needs shell-specific environment-variable syntax.
+
 ```bash
 pip install -e ".[dev]"
-
-# Control plane, a firm, and an API key (printed once).
-python -m control.bootstrap --firm acme --name "Acme Securities" \
-    --email ops@acme.test --role firm_admin
-
-# Build a batch. A separate process from the query service on purpose.
-python -m risk.build --firm acme --store ./data --synthetic 200000
-
-# Or ingest a real file through a saved mapping profile.
-python -m ingest.worker --firm acme --store ./data --once
-
-# Query service, pinned to one firm.
-RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000
-
-# Frontend. Put the token from bootstrap in web/.env.local as VITE_API_TOKEN.
-cd web && npm install && npm run dev           # http://localhost:5173
+cp .env.example .env          # copy on Windows too; edit if you like
 ```
 
-Settings and deployment topology are in [docs/hosting.md](docs/hosting.md).
+Then, in four terminals or one at a time:
+
+```bash
+# 1. Control plane, a firm, and an API key.
+python -m control.bootstrap --firm acme --name "Acme Securities" --email ops@acme.test
+
+# 2. Build a batch. A separate process from the query service on purpose.
+python -m risk.build --firm acme --synthetic 200000
+
+#    ...or ingest a real file through a saved mapping profile.
+python -m ingest.worker --firm acme --once
+
+# 3. Query service.
+python -m uvicorn api.main:app --port 8000
+
+# 4. Frontend.
+cd web && npm install && npm run dev        # http://localhost:5173
+```
+
+**Save the token bootstrap prints.** Only its SHA-256 is stored, so it cannot be
+recovered — but it takes one command to replace:
+
+```bash
+python -m control.keys issue --email ops@acme.test    # mint a new one
+python -m control.keys list                           # prefixes, never secrets
+python -m control.keys revoke --prefix 7e45a61a
+```
+
+Put it in `web/.env.local` (gitignored) as `VITE_API_TOKEN=rg_...` — the
+`keys issue` output prints the exact line.
+
+`.env.example` documents every setting. Two worth knowing:
+
+- **`RISK_GRID_FIRM` should stay unset locally.** It is the containment guard: a
+  process refusing to serve any firm but its own. Unset, the service runs
+  multi-firm and the caller's own firm decides, which is what a laptop wants.
+  Deployed, each container sets it, so a routing mistake cannot reach another
+  firm's data even with valid credentials.
+- **Without `RISK_GRID_SMTP_HOST`, reports and alerts print to the console**
+  rather than sending. A report that appears to send and does not is worse than
+  one that obviously did not.
+
+<details>
+<summary>If you would rather use environment variables than a file</summary>
+
+A real environment variable always beats `.env`, so either works.
+
+```bash
+RISK_GRID_FIRM=acme python -m uvicorn api.main:app --port 8000   # bash/zsh
+```
+```powershell
+$env:RISK_GRID_FIRM = "acme"                                      # PowerShell
+python -m uvicorn api.main:app --port 8000
+```
+```bat
+set RISK_GRID_FIRM=acme
+python -m uvicorn api.main:app --port 8000
+```
+</details>
+
+Deployment topology and costs are in [docs/hosting.md](docs/hosting.md).
 AG Grid Enterprise runs unlicensed with a watermark; set `VITE_AG_GRID_LICENSE`
 to clear it.
 
 ```bash
-pytest                          # 181 tests
+pytest                          # 200 tests
 python spikes/perf_spike.py     # the scaling table
 python spikes/storage_spike.py  # persistence, rollups, retention cost
 python spikes/eep_error.py      # pricing approximation study
@@ -92,6 +140,7 @@ node, about 13 KB. Full numbers in [docs/architecture.md](docs/architecture.md).
 | `risk/batch.py` | Snapshot identity, batch store, rollups, aggregate cache |
 | `risk/storage.py` | Parquet artifacts, manifest, local and S3 backends |
 | `risk/build.py` | Build worker: reprice, write artifacts, index the batch |
+| `config.py` | `.env` loading; a real environment variable always wins |
 | `control/` | Firms, users, API keys, batch index, audit log, views, reports, alerts |
 | `ingest/` | Canonical schema, field mapping, validation, connectors, the pipeline |
 | `alerting.py` | Alert rules, evaluated with the pivot engine |

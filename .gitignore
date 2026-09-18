@@ -16,3 +16,4 @@ web/*.tsbuildinfo
 *.db
 data/
 web/.env.local
+.env

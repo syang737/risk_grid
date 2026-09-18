@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from config import load_env
 from control.auth import Principal, served_firm
 from control.db import get_database
 from control.service import list_batches as list_batch_records
@@ -35,6 +36,10 @@ from .deps import (
     templates_for,
 )
 from .models import GridRequest, GridResponse, build_path, jsonable, translate_filters
+
+# Before anything reads configuration. uvicorn imports this module rather than
+# running it, so this is the only hook available.
+load_env()
 
 
 @asynccontextmanager

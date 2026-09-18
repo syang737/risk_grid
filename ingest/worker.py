@@ -26,6 +26,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from alerting import evaluate_batch
+from config import load_env
 from control.db import Database, get_database, set_database
 from control.models import BatchRecord, BatchStatus, IngestionProfile, IngestionRun, RunStatus
 from control.service import audit, register_batch
@@ -220,6 +221,7 @@ def poll_firm(
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env()
     parser = argparse.ArgumentParser(description="risk_grid ingestion worker")
     parser.add_argument("--firm", required=True)
     parser.add_argument("--store", default="./data")
