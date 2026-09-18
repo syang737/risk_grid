@@ -155,6 +155,10 @@ aside {
 
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .toggle.on { background: var(--accent); border-color: var(--accent); color: #0b0e13; }
+/* Adding a level is a different act from toggling a column, so it reads
+   differently: dashed, like the drill chips in the grid itself. */
+.toggle.add { border-style: dashed; color: var(--muted); }
+.toggle.add:hover { border-style: solid; color: inherit; }
 
 /* -- grid cells --------------------------------------------------------- */
 

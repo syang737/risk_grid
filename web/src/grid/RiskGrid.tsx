@@ -1,8 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type {
   ColDef,
+  ColumnRowGroupChangedEvent,
+  ColumnVisibleEvent,
   GetRowIdParams,
+  GridApi,
   GridReadyEvent,
   ICellRendererParams,
   IRowNode,
@@ -34,8 +37,15 @@ export interface RiskGridProps {
   batchId?: string;
   template?: string;
   onDimensionsChange: (dimensions: string[]) => void;
+  onDetailDimensionsChange: (dimensions: string[]) => void;
   onError: (message: string | null) => void;
 }
+
+const same = (a: string[], b: string[]) =>
+  a.length === b.length && a.every((value, index) => value === b[index]);
+
+const groupedColIds = (api: GridApi) =>
+  api.getRowGroupColumns().map((column) => column.getColId());
 
 export function RiskGrid({
   dimensions,
@@ -45,6 +55,7 @@ export function RiskGrid({
   batchId,
   template,
   onDimensionsChange,
+  onDetailDimensionsChange,
   onError,
 }: RiskGridProps) {
   const gridRef = useRef<AgGridReact>(null);
@@ -60,6 +71,17 @@ export function RiskGrid({
   // data arrives -- otherwise the user's place is lost on every drill.
   const pendingExpand = useRef<string[] | null>(null);
 
+  const dimensionNames = useMemo(() => dimensions.map((d) => d.name), [dimensions]);
+
+  /** Move the ref first: AG Grid reloads rows before React re-renders. */
+  const applyDimensions = useCallback(
+    (next: string[]) => {
+      contextRef.current = { ...contextRef.current, activeDimensions: next };
+      onDimensionsChange(next);
+    },
+    [onDimensionsChange],
+  );
+
   const handleDrill = useCallback(
     (dimension: string, params: ICellRendererParams) => {
       const node = params.node;
@@ -70,9 +92,65 @@ export function RiskGrid({
       next.splice(depth, 0, dimension);
 
       pendingExpand.current = route;
-      onDimensionsChange(next);
+      applyDimensions(next);
     },
-    [onDimensionsChange],
+    [applyDimensions],
+  );
+
+  /**
+   * The row-group panel writes back here.
+   *
+   * Without this the panel was one-way: AG Grid would happily regroup itself
+   * while `activeDimensions` -- which is what the datasource actually sends --
+   * stayed as it was, so the grid and the server disagreed about what a row
+   * meant. Dragging in, dragging out and reordering all raise this one event.
+   */
+  const onColumnRowGroupChanged = useCallback(
+    (event: ColumnRowGroupChangedEvent) => {
+      const next = groupedColIds(event.api);
+      const current = contextRef.current.activeDimensions;
+
+      if (next.length === 0) {
+        // No grouping at all is a flat list of every position in the book, so
+        // the last dimension does not come out -- same rule the Drill order
+        // panel enforces on its own remove button.
+        event.api.setRowGroupColumns(current);
+        return;
+      }
+      if (same(next, current)) return;
+      applyDimensions(next);
+    },
+    [applyDimensions],
+  );
+
+  /**
+   * Showing a dimension column is the same act as toggling its "Show as
+   * columns" chip, so the columns tool panel has to say so. Otherwise
+   * un-hiding one there gives a column of blanks: the server is told
+   * explicitly which detail dimensions to compute and would not have been
+   * asked for this one.
+   */
+  const onColumnVisible = useCallback(
+    (event: ColumnVisibleEvent) => {
+      const grouped = new Set(groupedColIds(event.api));
+      const known = new Set(dimensionNames);
+      const visible = (event.api.getColumns() ?? [])
+        .filter((column) => known.has(column.getColId()))
+        .filter((column) => !grouped.has(column.getColId()) && column.isVisible())
+        .map((column) => column.getColId());
+
+      // A dimension in the drill order keeps its chip, so moving one in and
+      // back out leaves the user's choice where they left it.
+      const shown = new Set(visible);
+      const current = contextRef.current.detailDimensions;
+      const next = current.filter((name) => grouped.has(name) || shown.has(name));
+      for (const name of visible) if (!next.includes(name)) next.push(name);
+
+      if (same(next, current)) return;
+      contextRef.current = { ...contextRef.current, detailDimensions: next };
+      onDetailDimensionsChange(next);
+    },
+    [dimensionNames, onDetailDimensionsChange],
   );
 
   const columnDefs = useMemo(
@@ -105,6 +183,26 @@ export function RiskGrid({
     (event: GridReadyEvent) => event.api.setGridOption("serverSideDatasource", datasource),
     [datasource],
   );
+
+  /**
+   * Refetch when the *request* changes but the row model does not.
+   *
+   * Detail dimensions and the column template are both computed server-side
+   * and named in the request, so adding either only changes the column
+   * definitions -- AG Grid has no reason to reload, and the new columns sit
+   * there empty until something else happens to trigger a fetch. Changing the
+   * drill order does not need this: that changes the grouping, which reloads
+   * on its own.
+   */
+  const requestKey = `${detailDimensions.join("\u0000")}|${template ?? ""}`;
+  const lastRequestKey = useRef(requestKey);
+  useEffect(() => {
+    if (lastRequestKey.current === requestKey) return;
+    lastRequestKey.current = requestKey;
+    // Not a purge: row ids are the node's full route, so expanded nodes keep
+    // their place across the refresh.
+    gridRef.current?.api?.refreshServerSide({ purge: false });
+  }, [requestKey]);
 
   /** Walk the saved route, expanding each node, once its level has loaded. */
   const onModelUpdated = useCallback(() => {
@@ -157,6 +255,8 @@ export function RiskGrid({
         rowModelType="serverSide"
         onGridReady={onGridReady}
         onModelUpdated={onModelUpdated}
+        onColumnRowGroupChanged={onColumnRowGroupChanged}
+        onColumnVisible={onColumnVisible}
         getRowId={(params: GetRowIdParams) => {
           const level = params.level ?? 0;
           const dimension = contextRef.current.activeDimensions[level];

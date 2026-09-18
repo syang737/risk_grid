@@ -266,7 +266,8 @@ def test_totals_reflect_post_aggregation_filters(book, req):
     # not associative, so a threshold sitting exactly on a group's value is a
     # coin toss rather than a test.
     ranked = sorted(aggregate(df, req).rows["worst"].to_list())
-    threshold = (ranked[11] + ranked[12]) / 2
+    mid = len(ranked) // 2
+    threshold = (ranked[mid - 1] + ranked[mid]) / 2
     filtered = dataclasses.replace(req, filters=(Filter("worst", "lessThan", threshold),))
 
     t = totals(df, filtered)

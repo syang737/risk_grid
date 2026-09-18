@@ -42,6 +42,7 @@ DIMENSIONS: dict[str, Dimension] = {
         Dimension("master_account", "Master Account", "account"),
         Dimension("account", "Account", "account"),
         Dimension("sector", "Product", "instrument"),
+        Dimension("industry", "Industry", "instrument"),
         Dimension("underlying", "Instrument", "instrument"),
         Dimension("instrument_type", "Type", "instrument"),
         Dimension("expiry", "Expiry", "instrument"),
@@ -54,7 +55,7 @@ DIMENSIONS: dict[str, Dimension] = {
 # Defaults matching the incumbent's two main tabs, as starting points only --
 # the user composes any order they like.
 ACCOUNT_DRILL = ("desk", "master_account", "account", "underlying", "contract")
-INSTRUMENT_DRILL = ("sector", "underlying", "contract", "account")
+INSTRUMENT_DRILL = ("sector", "industry", "underlying", "contract", "account")
 
 GREEK_COLUMNS = ("market_value", "und_qty", "delta", "gamma", "vega", "theta", "rho")
 

@@ -13,6 +13,7 @@ queries it is about to invalidate.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -94,8 +95,14 @@ def main(argv: list[str] | None = None) -> int:
     load_env()
     parser = argparse.ArgumentParser(description="Build a risk_grid batch")
     parser.add_argument("--firm", required=True)
-    parser.add_argument("--store", default="./data", help="directory or s3://bucket/prefix")
-    parser.add_argument("--templates", default=str(Path.home() / ".risk_grid"))
+    # Defaults read after `load_env`, so a `.env` alone is enough -- otherwise
+    # the README's "put it in .env and run these three commands" was a lie for
+    # this one command, which wrote to ./data whatever the file said.
+    parser.add_argument("--store", default=os.environ.get("RISK_GRID_STORE", "./data"),
+                        help="directory or s3://bucket/prefix")
+    parser.add_argument("--templates",
+                        default=os.environ.get("RISK_GRID_TEMPLATES",
+                                               str(Path.home() / ".risk_grid")))
     parser.add_argument("--config", default="Exposure", help="shock config name")
     parser.add_argument("--label", default="IntraDay")
     parser.add_argument("--batch-id", default=None)

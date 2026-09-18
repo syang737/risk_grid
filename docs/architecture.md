@@ -49,7 +49,7 @@ different dimension orders, so `PivotRequest` carries the order instead:
 
 ```
 dimensions  ("sector", "underlying", "contract")   ordered row grouping
-path        (("sector", "Banking"),)               expanded ancestors, as filters
+path        (("sector", "Technology"),)            expanded ancestors, as filters
 filters     (Filter("worst", "lessThan", -1e6),)   user column filters
 measures    from the active column template
 detail_dimensions                                  rendered as value-or-count cells
@@ -267,6 +267,54 @@ Citrix, none of which is the grid widget.
 Chip drill changes the dimension order, which reloads the grid — so the clicked
 row's route is saved and re-expanded once its level arrives, or the user loses
 their place on every drill.
+
+### The drill order has one owner
+
+The drill order can be set three ways — the side panel, a chip drill, and
+dragging in AG Grid's own row-group bar — and all three write the same React
+state, because that state is what the datasource sends to `/api/grid/rows`.
+
+That was not true at first. Only the dimensions in the drill order and the
+dimensions shown as columns had column definitions at all, and none of them set
+`enableRowGroup`, so AG Grid refused every drop: a chip could be dragged out of
+the row-group bar and never back in. Worse, dragging one out regrouped the grid
+locally while the request kept the old order, so the grid and the server
+disagreed about what a row meant. Now every dimension has a column definition,
+`onColumnRowGroupChanged` writes the panel's order back into state, and
+`onColumnVisible` does the same for the columns shown as chips — otherwise
+un-hiding one in the columns tool panel gives a column of blanks, since the
+server is told explicitly which detail dimensions to compute. A dimension
+dragged out of the drill order reappears as one of those columns, which is
+AG Grid's own behaviour and the reading that loses nothing: the level is gone
+but its values are still on screen.
+
+One rule is enforced rather than mirrored: the last dimension cannot be dragged
+out, because no grouping at all means a flat list of every position in the book.
+
+Adding a detail column or switching the column template changes the *request*
+without changing the row model, so AG Grid had no reason to reload and the new
+columns sat empty until something else happened to trigger a fetch. Both now
+refresh the server-side store explicitly, without purging it, so expanded nodes
+keep their place.
+
+`spikes/grid_interaction.py` drives all of this in a browser and asserts on the
+requests rather than the DOM — regrouping the grid locally while the request
+keeps the old order is exactly the failure a screenshot would not catch.
+
+### The demo book is made of real instruments
+
+`risk/synthetic.py` draws from `risk/universe.py`, a hard-coded table of about
+730 US tickers with their sector and industry. Classification is a lookup, not
+a draw — the generator used to assign a sector at random, so the same symbol
+could be a bank on one seed and a utility on the next. Strikes snap to the
+listed ladder and expiries to real Fridays, and the contract identifier is
+built the same way `ingest.mapping.finalise` builds one for a firm's file, so a
+synthetic book and an ingested book agree.
+
+Prices in that table are indicative levels for demo and load-test data, not
+market data, and the module says so. Volatility is generated from a per-sector
+base rather than tabulated, because a per-symbol vol number would be a much
+stronger claim with nothing behind it.
 
 ---
 

@@ -146,7 +146,8 @@ node, about 13 KB. Full numbers in [docs/architecture.md](docs/architecture.md).
 | `alerting.py` | Alert rules, evaluated with the pivot engine |
 | `notify/` | Report rendering, screenshots, email delivery |
 | `risk/templates.py` | Column templates and shock configs |
-| `risk/synthetic.py` | Realistically-shaped synthetic book generator |
+| `risk/synthetic.py` | Synthetic book generator: real symbols, listed strikes and expiries |
+| `risk/universe.py` | ~730 tickers with sector, industry and an indicative price |
 | `api/` | FastAPI, AG Grid server-side row model contract |
 | `web/` | React + AG Grid Enterprise frontend |
 | `spikes/` | Performance and accuracy studies |

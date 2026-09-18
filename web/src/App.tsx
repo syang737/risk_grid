@@ -173,6 +173,7 @@ export default function App() {
               batchId={batch.id}
               template={template}
               onDimensionsChange={setActiveDimensions}
+              onDetailDimensionsChange={setDetailDimensions}
               onError={setError}
             />
           ) : (

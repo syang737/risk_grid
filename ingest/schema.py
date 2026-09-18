@@ -46,6 +46,8 @@ FIELDS: tuple[Field, ...] = (
     Field("underlying", pl.Utf8, required=True, description="Underlying symbol"),
     Field("sector", pl.Utf8, default="Unclassified",
           description="Product or sector classification"),
+    Field("industry", pl.Utf8, default="Unclassified",
+          description="Finer classification below sector"),
     Field("instrument_type", pl.Utf8, derived_from=("strike",),
           description="OPTION or EQUITY; inferred from the presence of a strike"),
     Field("strike", pl.Float64, default=0.0, description="Option strike; 0 for equity"),

@@ -334,11 +334,20 @@ def finalise(frame: pl.DataFrame, batch_date: date) -> pl.DataFrame:
         out = out.with_columns(pl.col("account").alias("master_account"))
 
     if "contract" not in present:
+        # A strike truncated to an integer would put the 147 and 147.5 lines on
+        # one contract identifier, merging two instruments in the grid -- so
+        # whole strikes print whole and fractional ones keep their decimals.
+        strike = pl.col("strike").cast(pl.Float64, strict=False)
+        strike_label = (
+            pl.when(strike == strike.round(0))
+            .then(strike.cast(pl.Int64, strict=False).cast(pl.Utf8))
+            .otherwise(strike.round(2).cast(pl.Utf8).str.strip_chars_end("0"))
+        )
         out = out.with_columns(
             pl.when(pl.col("is_option"))
             .then(
                 pl.col("underlying") + " " + pl.col("expiry").cast(pl.Utf8) + " "
-                + pl.col("strike").cast(pl.Int64, strict=False).cast(pl.Utf8) + pl.col("right")
+                + strike_label + pl.col("right")
             )
             .otherwise(pl.col("underlying"))
             .alias("contract")
@@ -384,7 +393,8 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
     "desk": ("businessunit", "bu", "group", "tradinggroup", "book"),
     "firm": ("entity", "legalentity", "company"),
     "underlying": ("symbol", "ticker", "root", "underlyingsymbol", "undsym", "sym", "rootsymbol"),
-    "sector": ("industry", "product", "productgroup", "classification", "assetclass"),
+    "sector": ("product", "productgroup", "classification", "assetclass"),
+    "industry": ("industrygroup", "subsector", "subindustry"),
     "instrument_type": ("sectype", "securitytype", "instrumenttype", "type", "prodtype"),
     "strike": ("strikeprice", "k", "exerciseprice"),
     "expiry": ("expiration", "expdate", "maturity", "expirydate", "expirationdate", "maturitydate"),

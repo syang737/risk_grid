@@ -20,6 +20,7 @@ const COMPARATORS = [
 
 const DIMENSIONS = [
   { value: "sector", label: "Product" },
+  { value: "industry", label: "Industry" },
   { value: "underlying", label: "Instrument" },
   { value: "account", label: "Account" },
   { value: "master_account", label: "Master Account" },

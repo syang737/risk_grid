@@ -17,3 +17,4 @@ web/*.tsbuildinfo
 data/
 web/.env.local
 .env
+grid-drag-failure.png

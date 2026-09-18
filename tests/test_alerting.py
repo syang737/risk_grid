@@ -371,7 +371,7 @@ def _export(n: int = 5_000, seed: int = 3) -> pl.DataFrame:
         pl.when(pl.col("qty") < 0).then(pl.lit("SHORT")).otherwise(pl.lit("LONG")).alias("Side"),
         pl.col("qty").abs().cast(pl.Int64).cast(pl.Utf8).alias("Quantity"),
         (pl.col("strike") * 1000).cast(pl.Int64).cast(pl.Utf8).alias("Strike Price"),
-        pl.col("expiry").alias("Days To Exp"),
+        pl.col("expiry").alias("Expiration"),
         pl.when(pl.col("is_option"))
         .then(pl.when(pl.col("is_call")).then(pl.lit("CALL")).otherwise(pl.lit("PUT")))
         .otherwise(pl.lit("")).alias("C/P"),
@@ -388,7 +388,7 @@ MAPPINGS = [
     {"field": "qty", "source": "Quantity", "transform": "signed_by",
      "params": {"side_column": "Side", "short_values": ["SHORT"]}},
     {"field": "strike", "source": "Strike Price", "transform": "scale", "params": {"factor": 0.001}},
-    {"field": "expiry", "source": "Days To Exp", "transform": "trim", "params": {}},
+    {"field": "expiry", "source": "Expiration", "transform": "trim", "params": {}},
     {"field": "right", "source": "C/P", "transform": "call_put", "params": {}},
     {"field": "underlying_price", "source": "Und Last", "transform": "number", "params": {}},
     {"field": "iv", "source": "Implied Vol", "transform": "scale", "params": {"factor": 0.01}},

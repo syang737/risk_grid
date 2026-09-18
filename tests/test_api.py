@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from risk.universe import SECTORS
+
 DIMS = ["sector", "underlying", "contract", "account"]
 FIRM = "acme"
 OTHER = "globex"
@@ -253,7 +255,8 @@ def test_root_block(client, tokens):
     data = post(client, tokens[FIRM])
     assert data["groupColumn"] == "sector"
     assert data["isLeaf"] is False
-    assert data["lastRow"] == len(data["rows"]) == 25
+    # Every sector in the universe is represented at 20,000 positions.
+    assert data["lastRow"] == len(data["rows"]) == len(SECTORS)
     assert sum(r["positions"] for r in data["rows"]) == 20_000
     assert data["totals"]["positions"] == 20_000
 
@@ -289,7 +292,7 @@ def test_paging_reports_unpaged_last_row(client, tokens):
                 sortModel=[{"colId": "worst", "sort": "asc"}])
 
     assert len(page["rows"]) == 5
-    assert page["lastRow"] == full["lastRow"] == 25
+    assert page["lastRow"] == full["lastRow"] == len(SECTORS)
     assert [r["sector"] for r in page["rows"]] == [r["sector"] for r in ranked["rows"]][5:10]
 
 
@@ -347,7 +350,8 @@ def test_text_filter(client, tokens):
 def test_number_filter_on_aggregate_column(client, tokens):
     """Filtering Max Risk must select groups, not positions."""
     unfiltered = post(client, tokens[FIRM])
-    threshold = sorted(r["worst"] for r in unfiltered["rows"])[12]
+    ranked = sorted(r["worst"] for r in unfiltered["rows"])
+    threshold = ranked[len(ranked) // 2]
 
     data = post(client, tokens[FIRM], filterModel={
         "worst": {"filterType": "number", "type": "lessThan", "filter": threshold}})

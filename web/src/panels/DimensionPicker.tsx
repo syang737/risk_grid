@@ -10,7 +10,7 @@ interface Props {
 
 const PRESETS: Array<{ label: string; dimensions: string[] }> = [
   { label: "By account", dimensions: ["desk", "master_account", "account", "underlying", "contract"] },
-  { label: "By instrument", dimensions: ["sector", "underlying", "contract", "account"] },
+  { label: "By instrument", dimensions: ["sector", "industry", "underlying", "contract", "account"] },
   { label: "By expiry", dimensions: ["expiry", "underlying", "account"] },
 ];
 
@@ -78,6 +78,26 @@ export function DimensionPicker({
           </li>
         ))}
       </ol>
+
+      <p className="hint">
+        Add one here or drag it into the grouping bar above the grid — both write the same
+        order.
+      </p>
+      <div className="chips">
+        {dimensions
+          .filter((d) => !active.includes(d.name))
+          .map((d) => (
+            <button
+              key={d.name}
+              type="button"
+              className="toggle add"
+              title={`Group by ${d.label} after ${byName.get(active[active.length - 1])?.label ?? "the last level"}`}
+              onClick={() => onActiveChange([...active, d.name])}
+            >
+              + {d.label}
+            </button>
+          ))}
+      </div>
 
       <div className="panel-head">Show as columns</div>
       <p className="hint">
