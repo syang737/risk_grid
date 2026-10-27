@@ -84,6 +84,9 @@ TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-/]{0,9}$")
 def classify(raw: str) -> tuple[str, str | None]:
     """Return (normalised id, OpenFIGI idType), or idType None if unusable."""
     s = raw.strip().upper()
+    # Excel drops a CUSIP's leading zeros; the check digit says when padding is right.
+    if s.isdigit() and 6 <= len(s) < 9 and cusip_valid(s.zfill(9)):
+        return s.zfill(9), "ID_CUSIP"
     if ISIN_RE.match(s):
         return s, "ID_ISIN" if isin_valid(s) else None
     if CUSIP_RE.match(s):
@@ -91,6 +94,13 @@ def classify(raw: str) -> tuple[str, str | None]:
     if TICKER_RE.match(s):
         return s, "TICKER"
     return s, None
+
+
+def why_invalid(s: str) -> str:
+    if re.match(r"^\d(\.\d+)?E\+\d+$", s):
+        # 78471E109 opened in Excel; the digits are gone for good.
+        return "Excel scientific notation, re-export as text"
+    return "invalid / bad check digit"
 
 
 def job(ident: str, id_type: str) -> dict:
@@ -146,7 +156,8 @@ HEADERS = {"cusip", "isin", "symbol", "ticker", "identifier", "id", "security"}
 
 
 def read_ids(path: str) -> list[str]:
-    with open(path, newline="") as f:
+    # utf-8-sig: Excel's "CSV UTF-8" starts with a byte-order mark.
+    with open(path, newline="", encoding="utf-8-sig") as f:
         ids = [row[0] for row in csv.reader(f) if row and row[0].strip()]
     # A header would otherwise pass as a ticker.
     if ids and ids[0].strip().lower() in HEADERS:
@@ -166,7 +177,8 @@ def progress(done: int, total: int, t0: float) -> None:
 def report(cols: list[str], out: list[list[str]], path: str | None) -> None:
     """The table on screen, or every row to a CSV when there are too many."""
     if path:
-        with open(path, "w", newline="") as f:
+        # utf-8-sig so Excel reads the names correctly, on Windows too.
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerows([cols, *out])
         print(f"{len(out)} rows written to {path}")
         return
@@ -190,6 +202,7 @@ def main() -> None:
     classified = [classify(r) for r in raw]
     # Requests repeat identifiers; each is sent once.
     valid = list(dict.fromkeys((i, t) for i, t in classified if t))
+    rejected = sum(1 for _, t in classified if not t)
     results: dict[tuple[str, str], dict] = {}
 
     t0 = time.perf_counter()
@@ -200,25 +213,39 @@ def main() -> None:
         progress(min(start + batch, len(valid)), len(valid), t0)
         if not key and start + batch < len(valid):
             time.sleep(2.5)  # 25 requests/minute unauthenticated
+
+    # CINS -- a CUSIP for a non-US issuer, starting with a letter -- is its own
+    # idType at OpenFIGI, and comes back not found as a CUSIP.
+    cins = [i for (i, t), res in results.items() if t == "ID_CUSIP" and "data" not in res and i[0].isalpha()]
+    for start in range(0, len(cins), batch):
+        chunk = cins[start : start + batch]
+        for ident, res in zip(chunk, post([job(i, "ID_CINS") for i in chunk], key)):
+            if "data" in res:
+                results[(ident, "ID_CUSIP")] = res
+        progress(min(start + batch, len(cins)), len(cins), t0)
     elapsed = time.perf_counter() - t0
 
     cols = ["input", "type", "status", "ticker", "massive", "compositeFIGI", "sector", "secType", "name"]
     out = []
-    for ident, id_type in classified:
+    for (ident, id_type), original in zip(classified, raw):
         if not id_type:
-            out.append([ident, "-", "invalid / bad check digit", "", "", "", "", "", ""])
+            out.append([ident, "-", why_invalid(ident), "", "", "", "", "", ""])
             continue
         res = results[(ident, id_type)]
         if "data" not in res:
             out.append([ident, id_type, res.get("warning") or res.get("error", "?"), "", "", "", "", "", ""])
             continue
         row, status = pick(res["data"])
+        if ident != original.strip().upper():
+            status += ", zero-padded"
+        # A foreign venue's ticker (BZHGBP) would price something else.
+        mt = None if status.startswith("no US") else massive_ticker(row)
         out.append([
             ident,
             id_type,
             status,
             row.get("ticker") or "",
-            massive_ticker(row) or "not priceable",
+            mt or "not priceable",
             row.get("compositeFIGI") or "",
             row.get("marketSector") or "",
             row.get("securityType") or "",
@@ -230,7 +257,7 @@ def main() -> None:
     resolved = sum(1 for r in out if r[2].startswith("ok"))
     print(
         f"\n{resolved}/{len(out)} resolved cleanly, "
-        f"{len(classified) - len(valid)} rejected before sending, "
+        f"{rejected} rejected before sending, "
         f"{len(valid)} unique ids in {elapsed:.1f}s ({'keyed' if key else 'no key'})"
     )
 
