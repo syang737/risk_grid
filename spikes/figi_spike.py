@@ -134,9 +134,12 @@ def pick(rows: list[dict]) -> tuple[dict | None, str]:
     return rows[0], f"no US listing ({len(rows)} rows)"
 
 
-def massive_ticker(figi_ticker: str | None) -> str | None:
+def massive_ticker(row: dict) -> str | None:
+    # Massive prices equities only; a bond's FIGI "ticker" is a description.
+    if row.get("marketSector") != "Equity" or not row.get("ticker"):
+        return None
     # OpenFIGI writes share classes as BRK/B; Massive as BRK.B.
-    return figi_ticker.replace("/", ".") if figi_ticker else None
+    return row["ticker"].replace("/", ".")
 
 
 def read_ids(path: str) -> list[str]:
@@ -167,15 +170,15 @@ def main() -> None:
             time.sleep(2.5)  # 25 requests/minute unauthenticated
     elapsed = time.perf_counter() - t0
 
-    cols = ["input", "type", "status", "ticker", "massive", "compositeFIGI", "secType", "name"]
+    cols = ["input", "type", "status", "ticker", "massive", "compositeFIGI", "sector", "secType", "name"]
     out = []
     for ident, id_type in classified:
         if not id_type:
-            out.append([ident, "-", "invalid / bad check digit", "", "", "", "", ""])
+            out.append([ident, "-", "invalid / bad check digit", "", "", "", "", "", ""])
             continue
         res = results[(ident, id_type)]
         if "data" not in res:
-            out.append([ident, id_type, res.get("warning") or res.get("error", "?"), "", "", "", "", ""])
+            out.append([ident, id_type, res.get("warning") or res.get("error", "?"), "", "", "", "", "", ""])
             continue
         row, status = pick(res["data"])
         out.append([
@@ -183,9 +186,10 @@ def main() -> None:
             id_type,
             status,
             row.get("ticker") or "",
-            massive_ticker(row.get("ticker")) or "",
+            massive_ticker(row) or "not priceable",
             row.get("compositeFIGI") or "",
-            row.get("securityType2") or row.get("securityType") or "",
+            row.get("marketSector") or "",
+            row.get("securityType") or "",
             (row.get("name") or "")[:30],
         ])
 
