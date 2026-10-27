@@ -9,12 +9,10 @@ This measures the hit rate before anything gets built on it:
 
   1. classify    -- CUSIP / ISIN / ticker by shape, check digits validated
   2. resolve     -- batched OpenFIGI /v3/mapping
-  3. price       -- previous close from Massive grouped daily: one call per run
-  4. report      -- the US composite listing per identifier, and what is left
+  3. report      -- the US composite listing per identifier, and what is left
 
 Stdlib only, so it runs anywhere. Set OPENFIGI_API_KEY for 100-id batches and
-the higher rate limit; without it, batches are 10 and requests 25/minute. Set
-MASSIVE_API_KEY to add prices; without it, the spike only resolves.
+the higher rate limit; without it, batches are 10 and requests 25/minute.
 
 Run:  python spikes/figi_spike.py [ID ...] [--file ids.csv]
 """
@@ -30,10 +28,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
 
 MAPPING_URL = "https://api.openfigi.com/v3/mapping"
-GROUPED_URL = "https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks/{day}"
 
 # AAPL, MSFT, BRK.B, SPY by CUSIP; AAPL and HSBC by ISIN; a Treasury; a ticker;
 # and AAPL's CUSIP with a bad check digit.
@@ -146,38 +142,6 @@ def massive_ticker(row: dict) -> str | None:
     return row["ticker"].replace("/", ".")
 
 
-def _eastern_now() -> datetime:
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
-        # Windows without the tzdata package; an hour off in summer is fine
-        # for a cutoff this far from the close.
-        return datetime.now(timezone(timedelta(hours=-5)))
-
-
-def previous_closes(key: str) -> tuple[date, dict[str, float]]:
-    """Every US close for the latest completed session, in one call.
-
-    Today counts only once the evening session is over, so a run during market
-    hours never picks up a partial bar. Weekends and holidays come back empty
-    and are walked past.
-    """
-    now = _eastern_now()
-    day = now.date() if now.hour >= 20 else now.date() - timedelta(days=1)
-    for _ in range(10):
-        # Unadjusted: the price the security actually closed at.
-        url = GROUPED_URL.format(day=day.isoformat()) + "?adjusted=false&include_otc=true"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = json.load(resp)
-        if body.get("resultsCount"):
-            return day, {r["T"]: r["c"] for r in body["results"]}
-        day -= timedelta(days=1)
-    raise RuntimeError(f"no grouped daily results in the 10 days before {now.date()}")
-
-
 def read_ids(path: str) -> list[str]:
     with open(path, newline="") as f:
         return [row[0] for row in csv.reader(f) if row and row[0].strip()]
@@ -206,36 +170,23 @@ def main() -> None:
             time.sleep(2.5)  # 25 requests/minute unauthenticated
     elapsed = time.perf_counter() - t0
 
-    massive_key = os.environ.get("MASSIVE_API_KEY")
-    as_of, closes = previous_closes(massive_key) if massive_key else (None, {})
-
-    cols = ["input", "type", "status", "ticker", "massive", "close", "compositeFIGI", "sector", "secType", "name"]
+    cols = ["input", "type", "status", "ticker", "massive", "compositeFIGI", "sector", "secType", "name"]
     out = []
     for ident, id_type in classified:
         if not id_type:
-            out.append([ident, "-", "invalid / bad check digit", "", "", "", "", "", "", ""])
+            out.append([ident, "-", "invalid / bad check digit", "", "", "", "", "", ""])
             continue
         res = results[(ident, id_type)]
         if "data" not in res:
-            out.append([ident, id_type, res.get("warning") or res.get("error", "?"), "", "", "", "", "", "", ""])
+            out.append([ident, id_type, res.get("warning") or res.get("error", "?"), "", "", "", "", "", ""])
             continue
         row, status = pick(res["data"])
-        mt = massive_ticker(row)
-        if not massive_key:
-            close = ""
-        elif mt is None:
-            close = "-"
-        elif mt in closes:
-            close = f"{closes[mt]:g}"
-        else:
-            close = "no close"
         out.append([
             ident,
             id_type,
             status,
             row.get("ticker") or "",
-            mt or "not priceable",
-            close,
+            massive_ticker(row) or "not priceable",
             row.get("compositeFIGI") or "",
             row.get("marketSector") or "",
             row.get("securityType") or "",
@@ -253,9 +204,6 @@ def main() -> None:
         f"{len(classified) - len(valid)} rejected before sending, "
         f"{len(valid)} ids in {elapsed:.1f}s ({'keyed' if key else 'no key'})"
     )
-    if massive_key:
-        priced = sum(1 for r in out if r[5] not in ("", "-", "no close"))
-        print(f"{priced}/{len(out)} priced at the {as_of} close ({len(closes)} tickers in that session)")
 
 
 if __name__ == "__main__":
