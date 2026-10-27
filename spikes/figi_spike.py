@@ -14,7 +14,7 @@ This measures the hit rate before anything gets built on it:
 Stdlib only, so it runs anywhere. Set OPENFIGI_API_KEY for 100-id batches and
 the higher rate limit; without it, batches are 10 and requests 25/minute.
 
-Run:  python spikes/figi_spike.py [ID ...] [--file ids.csv]
+Run:  python spikes/figi_spike.py [ID ...] [--file ids.csv] [--out results.csv]
 """
 
 from __future__ import annotations
@@ -142,15 +142,45 @@ def massive_ticker(row: dict) -> str | None:
     return row["ticker"].replace("/", ".")
 
 
+HEADERS = {"cusip", "isin", "symbol", "ticker", "identifier", "id", "security"}
+
+
 def read_ids(path: str) -> list[str]:
     with open(path, newline="") as f:
-        return [row[0] for row in csv.reader(f) if row and row[0].strip()]
+        ids = [row[0] for row in csv.reader(f) if row and row[0].strip()]
+    # A header would otherwise pass as a ticker.
+    if ids and ids[0].strip().lower() in HEADERS:
+        ids = ids[1:]
+    return ids
+
+
+def progress(done: int, total: int, t0: float) -> None:
+    if done % max(total // 100, 1) and done != total:
+        return
+    sys.stderr.write(f"\r  {done}/{total}  {time.perf_counter() - t0:.0f}s")
+    if done == total:
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def report(cols: list[str], out: list[list[str]], path: str | None) -> None:
+    """The table on screen, or every row to a CSV when there are too many."""
+    if path:
+        with open(path, "w", newline="") as f:
+            csv.writer(f).writerows([cols, *out])
+        print(f"{len(out)} rows written to {path}")
+        return
+    widths = [max(len(c), *(len(r[i]) for r in out)) for i, c in enumerate(cols)]
+    print("  ".join(c.ljust(w) for c, w in zip(cols, widths)))
+    for r in out:
+        print("  ".join(v.ljust(w) for v, w in zip(r, widths)))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("ids", nargs="*", help="identifiers (default: a built-in sample)")
     ap.add_argument("--file", help="CSV or text file; first column is the identifier")
+    ap.add_argument("--out", help="write every row to this CSV instead of the screen")
     args = ap.parse_args()
 
     raw = (read_ids(args.file) if args.file else []) + args.ids or SAMPLE
@@ -158,7 +188,8 @@ def main() -> None:
     batch = 100 if key else 10
 
     classified = [classify(r) for r in raw]
-    valid = [(i, t) for i, t in classified if t]
+    # Requests repeat identifiers; each is sent once.
+    valid = list(dict.fromkeys((i, t) for i, t in classified if t))
     results: dict[tuple[str, str], dict] = {}
 
     t0 = time.perf_counter()
@@ -166,6 +197,7 @@ def main() -> None:
         chunk = valid[start : start + batch]
         for (ident, id_type), res in zip(chunk, post([job(*v) for v in chunk], key)):
             results[(ident, id_type)] = res
+        progress(min(start + batch, len(valid)), len(valid), t0)
         if not key and start + batch < len(valid):
             time.sleep(2.5)  # 25 requests/minute unauthenticated
     elapsed = time.perf_counter() - t0
@@ -193,16 +225,13 @@ def main() -> None:
             (row.get("name") or "")[:30],
         ])
 
-    widths = [max(len(c), *(len(r[i]) for r in out)) for i, c in enumerate(cols)]
-    print("  ".join(c.ljust(w) for c, w in zip(cols, widths)))
-    for r in out:
-        print("  ".join(v.ljust(w) for v, w in zip(r, widths)))
+    report(cols, out, args.out)
 
     resolved = sum(1 for r in out if r[2].startswith("ok"))
     print(
         f"\n{resolved}/{len(out)} resolved cleanly, "
         f"{len(classified) - len(valid)} rejected before sending, "
-        f"{len(valid)} ids in {elapsed:.1f}s ({'keyed' if key else 'no key'})"
+        f"{len(valid)} unique ids in {elapsed:.1f}s ({'keyed' if key else 'no key'})"
     )
 
 

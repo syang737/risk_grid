@@ -14,22 +14,24 @@ Massive never echoes the CUSIP back, so step 2 cannot be batched or bulk-joined.
 
 Stdlib only, so it runs anywhere. Needs MASSIVE_API_KEY.
 
-Run:  python spikes/massive_spike.py [ID ...] [--file ids.csv]
+Run:  python spikes/massive_spike.py [ID ...] [--file ids.csv] [--out results.csv]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import threading
 import os
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
-from figi_spike import SAMPLE, classify, read_ids
+from figi_spike import SAMPLE, classify, progress, read_ids, report
 
 BASE = "https://api.massive.com"
 
@@ -38,13 +40,15 @@ class Client:
     def __init__(self, key: str) -> None:
         self.key = key
         self.calls = 0
+        self._lock = threading.Lock()
 
     def get(self, path: str, **params) -> dict:
         url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         # Header auth, so the key never lands in a URL or a log line.
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.key}"})
         for attempt in range(4):
-            self.calls += 1
+            with self._lock:
+                self.calls += 1
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     return json.load(resp)
@@ -111,6 +115,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("ids", nargs="*", help="identifiers (default: a built-in sample)")
     ap.add_argument("--file", help="CSV or text file; first column is the identifier")
+    ap.add_argument("--out", help="write every row to this CSV instead of the screen")
+    ap.add_argument("--workers", type=int, default=8, help="concurrent CUSIP lookups")
     args = ap.parse_args()
 
     key = os.environ.get("MASSIVE_API_KEY")
@@ -119,20 +125,37 @@ def main() -> None:
     client = Client(key)
     raw = (read_ids(args.file) if args.file else []) + args.ids or SAMPLE
 
+    classified = [classify(r) for r in raw]
+
+    def cusip_of(ident: str, id_type: str | None) -> str | None:
+        if id_type == "ID_CUSIP":
+            return ident
+        if id_type == "ID_ISIN" and ident[:2] in ("US", "CA"):
+            return ident[2:11]
+        return None
+
+    # One call per CUSIP is the expensive part: look each up once, in parallel.
+    cusips = list(dict.fromkeys(c for c in (cusip_of(*x) for x in classified) if c))
+    found: dict[str, tuple[str | None, str, str]] = {}
     t0 = time.perf_counter()
+    with ThreadPoolExecutor(args.workers) as pool:
+        futures = {pool.submit(by_cusip, client, c): c for c in cusips}
+        for n, fut in enumerate(as_completed(futures), 1):
+            found[futures[fut]] = fut.result()
+            progress(n, len(cusips), t0)
+    resolve_s, resolve_calls = time.perf_counter() - t0, client.calls
+
     resolved = []  # input, type, ticker, status, name
-    for ident, id_type in (classify(r) for r in raw):
+    for ident, id_type in classified:
         if id_type is None:
             resolved.append((ident, "-", None, "invalid / bad check digit", ""))
         elif id_type == "TICKER":
             # Massive writes share classes as BRK.B.
             resolved.append((ident, id_type, ident.replace("/", "."), "as given", ""))
-        elif id_type == "ID_ISIN" and ident[:2] not in ("US", "CA"):
+        elif (cusip := cusip_of(ident, id_type)) is None:
             resolved.append((ident, id_type, None, "non-US ISIN, no CUSIP", ""))
         else:
-            cusip = ident[2:11] if id_type == "ID_ISIN" else ident
-            resolved.append((ident, id_type, *by_cusip(client, cusip)))
-    resolve_s, resolve_calls = time.perf_counter() - t0, client.calls
+            resolved.append((ident, id_type, *found[cusip]))
 
     as_of, closes = previous_closes(client)
     price_calls = client.calls - resolve_calls
@@ -148,14 +171,11 @@ def main() -> None:
             close = "no close"
         out.append([ident, id_type, status, ticker or "", close, name[:30]])
 
-    widths = [max(len(c), *(len(r[i]) for r in out)) for i, c in enumerate(cols)]
-    print("  ".join(c.ljust(w) for c, w in zip(cols, widths)))
-    for r in out:
-        print("  ".join(v.ljust(w) for v, w in zip(r, widths)))
+    report(cols, out, args.out)
 
     priced = sum(1 for r in out if r[4] not in ("", "no close"))
     print(
-        f"\nresolve: {resolve_calls} calls in {resolve_s:.1f}s\n"
+        f"\nresolve: {len(cusips)} unique CUSIPs, {resolve_calls} calls in {resolve_s:.1f}s\n"
         f"price:   {price_calls} calls, {len(closes)} tickers in the {as_of} session\n"
         f"{priced}/{len(out)} priced"
     )
